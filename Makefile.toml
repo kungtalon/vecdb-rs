@@ -1,0 +1,38 @@
+[env]
+CMAKE_VERSION = "3.31.4"
+
+[tasks.download_c_deps]
+install_script = '''
+sudo apt-get update
+sudo apt-get install -y libblas-dev liblapack-dev
+
+wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz -O /tmp/cmake.tgz;
+gunzip < /tmp/cmake.tgz | tar -xf - -C /tmp/;
+
+if [ -d "/usr/local/cmake" ]
+then
+    exist_cmake_version=$(cmake --version | awk 'NR==1 {print $3}');
+    if [ "$exist_cmake_version" = "$CMAKE_VERSION" ]
+    then
+        echo "cmake ${CMAKE_VERSION} already installed; skip...";
+        exit 0;
+    else
+        sudo rm -r /usr/local/cmake
+    fi
+fi
+
+sudo mv /tmp/cmake-${CMAKE_VERSION}-* /usr/local/cmake
+
+if [ -e "/usr/local/bin/cmake" ]
+then
+    sudo rm /usr/local/bin/cmake
+fi
+sudo ln -s /usr/local/cmake/bin/cmake /usr/local/bin/cmake
+
+
+if [ -e "/usr/local/bin/ctest" ]
+then
+    sudo rm /usr/local/bin/ctest
+fi
+sudo ln -s /usr/local/cmake/bin/ctest /usr/local/bin/ctest
+'''
