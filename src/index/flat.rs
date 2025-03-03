@@ -2,6 +2,8 @@ use crate::index::merror::IndexError;
 use crate::index::{Index, MetricType, SearchResult};
 use faiss::Index as FIndex;
 use faiss::{index_factory, IdMap};
+use ndarray::Array2 as NMatrix;
+use std::{array, vec};
 
 const FLAT_INDEX_OPTION: &str = "Flat";
 
@@ -34,6 +36,27 @@ impl Index for FlatIndex {
         Ok(())
     }
 
+    fn insert_many(&mut self, data: &NMatrix<f32>, labels: &Vec<u64>) -> Result<(), IndexError> {
+        let ids = labels
+            .iter()
+            .map(|&id| faiss::Idx::new(id))
+            .collect::<Vec<_>>();
+        let data_slice_opt = data.as_slice();
+
+        match data_slice_opt {
+            Some(data_slice) => {
+                self.index
+                    .add_with_ids(data_slice, ids.as_slice())
+                    .map_err(|e| IndexError::InsertionError(e.to_string()))?;
+                Ok(())
+            }
+            _ => Err(IndexError::InsertionError(format!(
+                "Failed to convert data matrix to slice {:?}",
+                data,
+            ))),
+        }
+    }
+
     fn search(&mut self, query: &Vec<f32>, k: usize) -> Result<SearchResult, IndexError> {
         let search_res = self
             .index
@@ -47,6 +70,8 @@ impl Index for FlatIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::format;
+
     use super::*;
 
     #[test]
@@ -60,6 +85,28 @@ mod tests {
         let result: Result<(), IndexError> = index.insert(&data, label);
 
         assert!(result.is_ok());
+        assert!(index.index.ntotal() == 1);
+    }
+
+    #[test]
+    fn test_insert_many() {
+        let dim = 4;
+        let mut index = FlatIndex::init(dim, MetricType::L2).expect("Failed to initialize index");
+
+        let data_from_vec =
+            NMatrix::from_shape_vec((2, 4), vec![1.0, 2.0, 3.0, 4.0, -1.0, 2.0, -3.0, 4.0]);
+        assert!(
+            data_from_vec.is_ok(),
+            "got error from converting vecs into matrix {:?}",
+            data_from_vec.err()
+        );
+        let data = data_from_vec.unwrap();
+
+        let labels = vec![42, 47];
+        let insert_result = index.insert_many(&data, &labels);
+
+        assert!(insert_result.is_ok());
+        assert!(index.index.ntotal() == 2);
     }
 
     #[test]
@@ -67,13 +114,18 @@ mod tests {
         let dim = 4;
         let mut index = FlatIndex::init(dim, MetricType::L2).expect("Failed to initialize index");
 
-        let data = [vec![1.0, 2.0, 3.0, 4.0], vec![-1.0, 2.0, -3.0, 4.0]];
-        let labels = &[42, 47];
-        for i in 0..data.len() {
-            index
-                .insert(&data[i], labels[i])
-                .expect("Failed to insert data");
-        }
+        let data_from_vec =
+            NMatrix::from_shape_vec((2, 4), vec![1.0, 2.0, 3.0, 4.0, -1.0, 2.0, -3.0, 4.0]);
+        assert!(
+            data_from_vec.is_ok(),
+            "error from converting vecs into matrix {:?}",
+            data_from_vec.err()
+        );
+        let data = data_from_vec.unwrap();
+
+        let labels = vec![42, 47];
+        let insert_result = index.insert_many(&data, &labels);
+        assert!(insert_result.is_ok());
 
         let query = vec![1.1, 2.1, 2.9, 3.9];
         let k: usize = 2;
