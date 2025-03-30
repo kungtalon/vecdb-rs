@@ -12,7 +12,7 @@ env:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: daangn/faiss:1.6.3
 
     steps:     
     - uses: actions/checkout@v4
@@ -27,7 +27,9 @@ jobs:
         fallback_version: 0.37.23 # optional, default is 0.37.23
         # Authentication token to use when connecting to the GitHub API. Token used to search the latest version, defining token reduces propability of rejection when requested github, it can be defined as `secrets.GITHUB_TOKEN`
         github_token: ${{ github.token }} # optional, default is ${{ github.token }}
-    - name: Build
+    - name: Download C Dependencies
       run: cargo make download_c_deps --verbose
+    - name: Build
+      run: cargo make --verbose
     - name: Run tests
       run: cargo test --verbose
