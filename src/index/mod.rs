@@ -1,13 +1,16 @@
 mod flat;
+mod hnsw;
 mod merror;
+mod option;
 
+use hnsw_rs::hnsw::Neighbour;
 use merror::IndexError;
 use ndarray::Array2 as NMatrix;
 
 pub trait Index {
-    fn insert(&mut self, data: &Vec<f32>, label: u64) -> Result<(), IndexError>;
-    fn insert_many(&mut self, data: &NMatrix<f32>, labels: &Vec<u64>) -> Result<(), IndexError>;
-    fn search(&mut self, query: &Vec<f32>, k: usize) -> Result<SearchResult, IndexError>;
+    fn insert(&mut self, params: &option::InsertParams) -> Result<(), IndexError>;
+    fn search(&mut self, query: &option::SearchQuery, k: usize)
+        -> Result<SearchResult, IndexError>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +24,15 @@ impl From<faiss::index::SearchResult> for SearchResult {
         Self {
             distances: value.distances,
             labels: value.labels.iter().map(|i| i.to_native() as u64).collect(),
+        }
+    }
+}
+
+impl From<Vec<Neighbour>> for SearchResult {
+    fn from(value: Vec<Neighbour>) -> Self {
+        Self {
+            distances: value.iter().map(|n| n.distance).collect(),
+            labels: value.iter().map(|n| n.d_id as u64).collect(),
         }
     }
 }

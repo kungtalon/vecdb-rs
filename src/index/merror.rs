@@ -6,6 +6,8 @@ pub enum IndexError {
     InitializationError(String),
     #[error("failed to insert new data: {0}")]
     InsertionError(String),
+    #[error("failed to do index query: {0}")]
+    QueryError(String),
     #[error("got unexpected error from index: {0}")]
     UnexpectedError(String),
 }
