@@ -45,12 +45,12 @@ pub struct InsertParams<'a> {
     pub data: &'a NMatrix<f32>,
     pub labels: &'a Vec<u64>,
 
-    hnsw_params: Option<HnswParams>,
+    pub(crate) hnsw_params: Option<HnswParams>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HnswParams {
-    pub replace_deleted: bool,
+    pub parallel: bool,
 }
 
 impl<'a> InsertParams<'a> {

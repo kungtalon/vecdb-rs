@@ -1,17 +1,12 @@
 use crate::index::merror::IndexError;
-use crate::index::option::{InsertParams, SearchQuery};
 use crate::index::{Index, MetricType, SearchResult};
 use anndists::dist::{distances, Distance};
-use hnsw_rs::api as hnsw_api;
+use hnsw_rs::api::{self as hnsw_api, AnnT};
 use hnsw_rs::hnsw;
-use ndarray::Array2 as NMatrix;
-use std::any::Any;
-use std::collections::VecDeque;
-use std::{array, vec};
 
 type FT = f32;
 
-trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> {
+pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> {
     fn get_nb_point(&self) -> usize;
 }
 
@@ -27,7 +22,6 @@ where
 pub struct HnswIndex {
     index: Box<dyn HnswIndexTrait>,
     dim: u32,
-    enable_parallel: bool,
 }
 
 pub struct HnswIndexOption {
@@ -35,48 +29,37 @@ pub struct HnswIndexOption {
     pub max_elements: u32,
     pub max_nb_connection: u32,
     pub max_layer: u32,
-    pub enable_parallel: bool,
 }
 
 impl HnswIndex {
     fn new(dim: u32, metric_type: MetricType, option: HnswIndexOption) -> Result<Self, IndexError> {
-        match metric_type {
-            MetricType::IP => {
-                let index = hnsw::Hnsw::new(
-                    option.max_nb_connection as usize,
-                    option.max_elements as usize,
-                    option.max_layer as usize,
-                    option.ef_construction as usize,
-                    distances::DistDot,
-                );
-
-                return Ok(Self {
-                    index: Box::new(index),
-                    dim: dim,
-                    enable_parallel: option.enable_parallel,
-                });
-            }
-            MetricType::L2 => {
-                let index = hnsw::Hnsw::new(
-                    option.max_nb_connection as usize,
-                    option.max_elements as usize,
-                    option.max_layer as usize,
-                    option.ef_construction as usize,
-                    distances::DistL2,
-                );
-
-                return Ok(Self {
-                    index: Box::new(index),
-                    dim: dim,
-                    enable_parallel: option.enable_parallel,
-                });
+        let index_box: Box<dyn HnswIndexTrait> = match metric_type {
+            MetricType::IP => Box::new(hnsw::Hnsw::new(
+                option.max_nb_connection as usize,
+                option.max_elements as usize,
+                option.max_layer as usize,
+                option.ef_construction as usize,
+                distances::DistDot,
+            )),
+            MetricType::L2 => Box::new(hnsw::Hnsw::new(
+                option.max_nb_connection as usize,
+                option.max_elements as usize,
+                option.max_layer as usize,
+                option.ef_construction as usize,
+                distances::DistL2,
+            )),
+            _ => {
+                return Err(IndexError::InitializationError(format!(
+                    "Metric Type {:?} is not supported",
+                    metric_type,
+                )))
             }
         };
 
-        Err(IndexError::InitializationError(format!(
-            "Metric Type {:?} is not supported",
-            metric_type,
-        )))
+        Ok(Self {
+            index: index_box,
+            dim: dim,
+        })
     }
 }
 
@@ -105,7 +88,7 @@ impl Index for HnswIndex {
             .map(|(data, &label)| (data.to_vec(), label as usize))
             .collect::<Vec<_>>();
 
-        if self.enable_parallel {
+        if params.hnsw_params.is_some() && params.hnsw_params.as_ref().unwrap().parallel {
             let mut zipped_data_labels = Vec::<(&Vec<FT>, usize)>::new();
 
             for i in 0..zipped_params.len() {
@@ -146,6 +129,8 @@ mod tests {
     use super::*;
     use ndarray::Array2 as NMatrix;
 
+    use crate::index::option::{HnswParams, InsertParams, SearchQuery};
+
     #[test]
     fn test_insert_many() {
         let dim = 4;
@@ -157,7 +142,6 @@ mod tests {
                 max_elements: 100,
                 max_nb_connection: 100,
                 max_layer: 16,
-                enable_parallel: true,
             },
         )
         .expect("Failed to initialize index");
@@ -173,7 +157,8 @@ mod tests {
 
         let labels = vec![42, 47];
         use crate::index::option::InsertParams;
-        let insert_result = index.insert(&InsertParams::new(&data, &labels));
+        let insert_result =
+            index.insert(&InsertParams::new(&data, &labels).with(HnswParams { parallel: true }));
 
         assert!(insert_result.is_ok());
         assert!(index.index.get_nb_point() == 2);
@@ -190,7 +175,6 @@ mod tests {
                 max_elements: 100,
                 max_nb_connection: 100,
                 max_layer: 16,
-                enable_parallel: false,
             },
         )
         .expect("Failed to initialize index");
