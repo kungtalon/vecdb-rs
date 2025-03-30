@@ -1,0 +1,33 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:     
+    - uses: actions/checkout@v4
+    - name: rust-cargo-make
+      # You may pin to the exact commit or the version.
+      # uses: davidB/rust-cargo-make@0e48cc6e5bc389442ae613b39273f3418b3b6268
+      uses: davidB/rust-cargo-make@v1.13.0
+      with:
+        # version(s) of cargo-make to install (eg. "0.22.2", "latest")
+        version: latest # optional, default is latest
+        # version of cargo-make to install if "latest" requested but it could not be found
+        fallback_version: 0.37.23 # optional, default is 0.37.23
+        # Authentication token to use when connecting to the GitHub API. Token used to search the latest version, defining token reduces propability of rejection when requested github, it can be defined as `secrets.GITHUB_TOKEN`
+        github_token: ${{ github.token }} # optional, default is ${{ github.token }}
+    - name: Build
+      run: cargo make download_c_deps --verbose
+    - name: Run tests
+      run: cargo test --verbose
