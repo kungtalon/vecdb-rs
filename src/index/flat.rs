@@ -1,5 +1,5 @@
-use crate::index::merror::IndexError;
 use crate::index::{Index, MetricType, SearchResult};
+use crate::merror::IndexError;
 use faiss::Index as FIndex;
 use faiss::{index_factory, IdMap};
 

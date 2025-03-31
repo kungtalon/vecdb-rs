@@ -1,5 +1,5 @@
-use crate::index::merror::IndexError;
 use crate::index::{Index, MetricType, SearchResult};
+use crate::merror::IndexError;
 use anndists::dist::{distances, Distance};
 use hnsw_rs::api::{self as hnsw_api, AnnT};
 use hnsw_rs::hnsw;

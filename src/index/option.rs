@@ -1,6 +1,6 @@
 use ndarray::Array2 as NMatrix;
 
-use super::merror::IndexError;
+use crate::merror::IndexError;
 
 #[derive(Debug, Clone)]
 pub struct SearchQuery {

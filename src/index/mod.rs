@@ -1,10 +1,9 @@
 mod flat;
 mod hnsw;
-mod merror;
 mod option;
 
+use crate::merror::IndexError;
 use hnsw_rs::hnsw::Neighbour;
-use merror::IndexError;
 use ndarray::Array2 as NMatrix;
 
 pub trait Index {
