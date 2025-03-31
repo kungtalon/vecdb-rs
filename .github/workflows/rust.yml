@@ -8,28 +8,36 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CMAKE_VERSION: 3.31.4
 
 jobs:
-  build:
+  ci:
+    runs-on: ubuntu-latest
 
-    runs-on: daangn/faiss:1.6.3
-
-    steps:     
+    steps:
     - uses: actions/checkout@v4
-    - name: rust-cargo-make
-      # You may pin to the exact commit or the version.
-      # uses: davidB/rust-cargo-make@0e48cc6e5bc389442ae613b39273f3418b3b6268
-      uses: davidB/rust-cargo-make@v1.13.0
-      with:
-        # version(s) of cargo-make to install (eg. "0.22.2", "latest")
-        version: latest # optional, default is latest
-        # version of cargo-make to install if "latest" requested but it could not be found
-        fallback_version: 0.37.23 # optional, default is 0.37.23
-        # Authentication token to use when connecting to the GitHub API. Token used to search the latest version, defining token reduces propability of rejection when requested github, it can be defined as `secrets.GITHUB_TOKEN`
-        github_token: ${{ github.token }} # optional, default is ${{ github.token }}
-    - name: Download C Dependencies
-      run: cargo make download_c_deps --verbose
-    - name: Build
-      run: cargo make --verbose
-    - name: Run tests
+    - name: Update apt
+      run: apt-get update
+    - name: Download Build Toolkits
+      run: apt-get install -y build-essential wget curl
+    - name: Download LLVM
+      run: |
+        apt-get install -y lsb-release software-properties-common gnupg
+        bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
+        ln -s /usr/bin/clang-19 /usr/local/bin/clang
+    - name: Download OpenBlas Lib
+      run: apt-get install -y libblas-dev liblapack-dev
+    - name: Download CMake
+      run: |
+        wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz -O /tmp/cmake.tgz;
+        gunzip < /tmp/cmake.tgz | tar -xf - -C /tmp/;
+        mv /tmp/cmake-${CMAKE_VERSION}-* /usr/local/cmake;
+        ln -s /usr/local/cmake/bin/cmake /usr/local/bin/cmake
+    - name: Download Rust
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        ln -s "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo
+    - name: Rust Build
+      run: cargo build --verbose
+    - name: Run Tests
       run: cargo test --verbose
