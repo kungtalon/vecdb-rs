@@ -23,7 +23,7 @@ jobs:
     - name: Download LLVM
       run: |
         sudo apt-get install -y lsb-release software-properties-common gnupg
-        bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
+        sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
         ln -s /usr/bin/clang-19 /usr/local/bin/clang
     - name: Download OpenBlas Lib
       run: sudo apt-get install -y libblas-dev liblapack-dev
