@@ -31,7 +31,7 @@ jobs:
       run: |
         wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz -O /tmp/cmake.tgz;
         gunzip < /tmp/cmake.tgz | tar -xf - -C /tmp/;
-        mv /tmp/cmake-${CMAKE_VERSION}-* /usr/local/cmake;
+        sudo mv /tmp/cmake-${CMAKE_VERSION}-* /usr/local/cmake;
         ln -s /usr/local/cmake/bin/cmake /usr/local/bin/cmake
     - name: Download Rust
       run: |
