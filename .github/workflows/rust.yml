@@ -17,16 +17,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Update apt
-      run: apt-get update
+      run: sudo apt-get update
     - name: Download Build Toolkits
-      run: apt-get install -y build-essential wget curl
+      run: sudo apt-get install -y build-essential wget curl
     - name: Download LLVM
       run: |
-        apt-get install -y lsb-release software-properties-common gnupg
+        sudo apt-get install -y lsb-release software-properties-common gnupg
         bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
         ln -s /usr/bin/clang-19 /usr/local/bin/clang
     - name: Download OpenBlas Lib
-      run: apt-get install -y libblas-dev liblapack-dev
+      run: sudo apt-get install -y libblas-dev liblapack-dev
     - name: Download CMake
       run: |
         wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz -O /tmp/cmake.tgz;
