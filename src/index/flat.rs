@@ -12,7 +12,7 @@ pub struct FlatIndex {
 }
 
 impl FlatIndex {
-    fn new(dim: u32, metric_type: MetricType) -> Result<Self, IndexError> {
+    pub fn new(dim: u32, metric_type: MetricType) -> Result<Self, IndexError> {
         let index = index_factory(dim, FLAT_INDEX_OPTION, faiss::MetricType::from(metric_type))
             .map_err(|e| IndexError::InitializationError(e.to_string()))?;
 

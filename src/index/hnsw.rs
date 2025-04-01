@@ -3,8 +3,32 @@ use crate::merror::IndexError;
 use anndists::dist::{distances, Distance};
 use hnsw_rs::api::{self as hnsw_api, AnnT};
 use hnsw_rs::hnsw;
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 
 type FT = f32;
+
+const DEFAULT_EF_CONSTRUCTION: u32 = 200;
+const DEFAULT_MAX_ELEMENTS: u32 = 500;
+const DEFAULT_MAX_NB_CONNECTION: u32 = 16;
+const DEFAULT_MAX_LAYER: u32 = 3;
+
+lazy_static! {
+    static ref EF_CONSTRUCTION: u32 =
+        read_hnsw_config_from_env("HNSW_EF_CONSTRUCTION", DEFAULT_EF_CONSTRUCTION);
+    static ref MAX_ELEMENTS: u32 =
+        read_hnsw_config_from_env("HNSW_MAX_ELEMENTS", DEFAULT_MAX_ELEMENTS);
+    static ref MAX_NB_CONNECTION: u32 =
+        read_hnsw_config_from_env("HNSW_MAX_NB_CONNECTION", DEFAULT_MAX_NB_CONNECTION);
+    static ref MAX_LAYER: u32 = read_hnsw_config_from_env("HNSW_MAX_LAYER", DEFAULT_MAX_LAYER);
+}
+
+fn read_hnsw_config_from_env(name: &str, default: u32) -> u32 {
+    match std::env::var(name) {
+        Ok(v) => v.parse::<u32>().unwrap_or(default),
+        Err(_) => default,
+    }
+}
 
 pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> {
     fn get_nb_point(&self) -> usize;
@@ -24,36 +48,74 @@ pub struct HnswIndex {
     dim: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HnswIndexOption {
-    pub ef_construction: u32,
-    pub max_elements: u32,
-    pub max_nb_connection: u32,
-    pub max_layer: u32,
+    pub ef_construction: Option<u32>,
+    pub max_elements: Option<u32>,
+    pub max_nb_connection: Option<u32>,
+    pub max_layer: Option<u32>,
+}
+
+struct HnswIndexSetting {
+    ef_construction: u32,
+    max_elements: u32,
+    max_nb_connection: u32,
+    max_layer: u32,
+}
+
+impl From<HnswIndexOption> for HnswIndexSetting {
+    fn from(option: HnswIndexOption) -> Self {
+        Self {
+            ef_construction: option.ef_construction.unwrap_or(*EF_CONSTRUCTION),
+            max_elements: option.max_elements.unwrap_or(*MAX_ELEMENTS),
+            max_nb_connection: option.max_nb_connection.unwrap_or(*MAX_NB_CONNECTION),
+            max_layer: option.max_layer.unwrap_or(*MAX_LAYER),
+        }
+    }
+}
+
+impl Into<Option<HnswIndexOption>> for HnswIndexSetting {
+    fn into(self) -> Option<HnswIndexOption> {
+        Some(HnswIndexOption {
+            ef_construction: Some(self.ef_construction),
+            max_elements: Some(self.max_elements),
+            max_nb_connection: Some(self.max_nb_connection),
+            max_layer: Some(self.max_layer),
+        })
+    }
 }
 
 impl HnswIndex {
-    fn new(dim: u32, metric_type: MetricType, option: HnswIndexOption) -> Result<Self, IndexError> {
+    pub fn new(
+        dim: u32,
+        metric_type: MetricType,
+        option: Option<HnswIndexOption>,
+    ) -> Result<Self, IndexError> {
+        let setting = match option {
+            Some(opt) => HnswIndexSetting::from(opt),
+            None => HnswIndexSetting {
+                ef_construction: *EF_CONSTRUCTION,
+                max_elements: *MAX_ELEMENTS,
+                max_nb_connection: *MAX_NB_CONNECTION,
+                max_layer: *MAX_LAYER,
+            },
+        };
+
         let index_box: Box<dyn HnswIndexTrait> = match metric_type {
             MetricType::IP => Box::new(hnsw::Hnsw::new(
-                option.max_nb_connection as usize,
-                option.max_elements as usize,
-                option.max_layer as usize,
-                option.ef_construction as usize,
+                setting.max_nb_connection as usize,
+                setting.max_elements as usize,
+                setting.max_layer as usize,
+                setting.ef_construction as usize,
                 distances::DistDot,
             )),
             MetricType::L2 => Box::new(hnsw::Hnsw::new(
-                option.max_nb_connection as usize,
-                option.max_elements as usize,
-                option.max_layer as usize,
-                option.ef_construction as usize,
+                setting.max_nb_connection as usize,
+                setting.max_elements as usize,
+                setting.max_layer as usize,
+                setting.ef_construction as usize,
                 distances::DistL2,
             )),
-            _ => {
-                return Err(IndexError::InitializationError(format!(
-                    "Metric Type {:?} is not supported",
-                    metric_type,
-                )))
-            }
         };
 
         Ok(Self {
@@ -137,12 +199,13 @@ mod tests {
         let mut index = HnswIndex::new(
             dim,
             MetricType::L2,
-            HnswIndexOption {
+            HnswIndexSetting {
                 ef_construction: 20,
                 max_elements: 100,
                 max_nb_connection: 100,
                 max_layer: 16,
-            },
+            }
+            .into(),
         )
         .expect("Failed to initialize index");
 
@@ -170,12 +233,13 @@ mod tests {
         let mut index = HnswIndex::new(
             dim,
             MetricType::L2,
-            HnswIndexOption {
+            HnswIndexSetting {
                 ef_construction: 200,
                 max_elements: 100,
                 max_nb_connection: 100,
                 max_layer: 16,
-            },
+            }
+            .into(),
         )
         .expect("Failed to initialize index");
 

@@ -3,13 +3,22 @@ mod hnsw;
 mod option;
 
 use crate::merror::IndexError;
+pub use flat::FlatIndex;
+pub use hnsw::{HnswIndex, HnswIndexOption};
 use hnsw_rs::hnsw::Neighbour;
-use ndarray::Array2 as NMatrix;
+pub use option::{InsertParams, SearchQuery};
+use serde::{Deserialize, Serialize};
 
 pub trait Index {
     fn insert(&mut self, params: &option::InsertParams) -> Result<(), IndexError>;
     fn search(&mut self, query: &option::SearchQuery, k: usize)
         -> Result<SearchResult, IndexError>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum IndexType {
+    Flat,
+    HNSW,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +45,8 @@ impl From<Vec<Neighbour>> for SearchResult {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum MetricType {
     IP = 0,
     L2 = 1,

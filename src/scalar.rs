@@ -1,12 +1,9 @@
 use std::collections::HashMap;
-use std::string;
 
 use crate::merror::DBError;
 use rocksdb::{Options, DB};
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::path::Path;
-use uuid::Uuid;
 
 type MDB = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
@@ -14,17 +11,6 @@ pub trait ScalarStorage {
     fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError>;
 
     fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError>;
-
-    fn get_str(&self, index: u64) -> Result<Option<String>, DBError> {
-        match self.get(index)? {
-            Some(bytes) => {
-                let value =
-                    String::from_utf8(bytes).map_err(|e| DBError::GetError(e.to_string()))?;
-                Ok(Some(value))
-            }
-            None => Ok(None),
-        }
-    }
 
     fn get_value(&self, index: u64) -> Result<Option<HashMap<String, Value>>, DBError> {
         match self.get(index)? {
@@ -36,14 +22,30 @@ pub trait ScalarStorage {
             None => Ok(None),
         }
     }
+
+    fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError>;
 }
 
-pub struct SingleThreadRocksDB {
+pub fn new_scalar_storage<P: AsRef<Path>>(
+    path: P,
+    concurrent: bool,
+) -> Result<Box<dyn ScalarStorage>, DBError> {
+    if concurrent {
+        let db = MultiThreadRocksDB::new(&path)?;
+        return Ok(Box::new(db));
+    }
+
+    let db = SingleThreadRocksDB::new(&path)?;
+
+    Ok(Box::new(db))
+}
+
+struct SingleThreadRocksDB {
     db: DB,
 }
 
 impl SingleThreadRocksDB {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
+    fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
         let mut options = Options::default();
         options.create_if_missing(true);
         let db = DB::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
@@ -71,14 +73,37 @@ impl ScalarStorage for SingleThreadRocksDB {
             None => Ok(None),
         }
     }
+
+    fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError> {
+        let mut result: Vec<HashMap<String, Value>> = Vec::new();
+
+        let keys_byte = indices.iter().map(|i| i.to_be_bytes());
+
+        let scalar_response = self.db.multi_get(keys_byte);
+
+        for scalar in scalar_response {
+            match scalar {
+                Ok(Some(bytes)) => {
+                    let value = serde_json::from_slice::<HashMap<String, Value>>(&bytes)
+                        .map_err(|e| DBError::GetError(e.to_string()))?;
+
+                    result.push(value);
+                }
+                Ok(None) => result.push(HashMap::new()),
+                Err(e) => return Err(DBError::GetError(e.to_string())),
+            }
+        }
+
+        Ok(result)
+    }
 }
 
-pub struct MultiThreadRocksDB {
+struct MultiThreadRocksDB {
     db: MDB,
 }
 
 impl MultiThreadRocksDB {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
+    fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
         let mut options = Options::default();
         options.create_if_missing(true);
         let db = MDB::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
@@ -106,6 +131,29 @@ impl ScalarStorage for MultiThreadRocksDB {
             None => Ok(None),
         }
     }
+
+    fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError> {
+        let mut result: Vec<HashMap<String, Value>> = Vec::new();
+
+        let keys_byte = indices.iter().map(|i| i.to_be_bytes());
+
+        let scalar_response = self.db.multi_get(keys_byte);
+
+        for scalar in scalar_response {
+            match scalar {
+                Ok(Some(bytes)) => {
+                    let value = serde_json::from_slice::<HashMap<String, Value>>(&bytes)
+                        .map_err(|e| DBError::GetError(e.to_string()))?;
+
+                    result.push(value);
+                }
+                Ok(None) => result.push(HashMap::new()),
+                Err(e) => return Err(DBError::GetError(e.to_string())),
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +161,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use uuid::Uuid;
 
     fn setup(suffix: &str) -> PathBuf {
         let db_path = Path::new("/tmp/test_db").join(suffix);
@@ -126,17 +175,36 @@ mod tests {
         return db_path;
     }
 
-    fn test_db_get_str<D: ScalarStorage>(db: &mut D) {
-        let key = 1u64;
-        let value = b"Hello, world!";
-        db.put(key, value).unwrap();
+    fn test_db_multi_get_value(db: &mut Box<dyn ScalarStorage>) {
+        let key1 = 1u64;
+        let msg1 = "Hello, world";
+        let key2 = 2u64;
+        let msg2 = "Goodbye, world";
+        db.put(
+            key1,
+            serde_json::to_vec(&HashMap::from([("msg", msg1)]))
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
+        db.put(
+            key2,
+            serde_json::to_vec(&HashMap::from([("msg", msg2)]))
+                .unwrap()
+                .as_ref(),
+        )
+        .unwrap();
 
-        let retrieved_value = db.get_str(key).unwrap().expect("failed to get value");
-        assert_eq!(retrieved_value, String::from_utf8_lossy(value));
+        let retrieved_value = db
+            .multi_get_value(&[key1, key2])
+            .expect("failed to get value");
+        assert_eq!(retrieved_value.len(), 2);
+        assert_eq!(retrieved_value[0].get("msg").unwrap(), msg1);
+        assert_eq!(retrieved_value[1].get("msg").unwrap(), msg2);
     }
 
-    fn test_db_get_value<D: ScalarStorage>(db: &mut D) {
-        let key = 2u64;
+    fn test_db_get_value(db: &mut Box<dyn ScalarStorage>) {
+        let key = 3u64;
         let value = HashMap::from([
             ("name".to_string(), Value::String("Alice".to_string())),
             ("age".to_string(), Value::Number(30.into())),
@@ -157,9 +225,9 @@ mod tests {
     fn test_single_thread_rocksdb() {
         let path = setup(format!("single_thread_{}", Uuid::new_v4().to_string()).as_str());
 
-        let mut db: SingleThreadRocksDB = SingleThreadRocksDB::new(&path).unwrap();
+        let mut db = new_scalar_storage(&path, false).unwrap();
 
-        test_db_get_str(&mut db);
+        test_db_multi_get_value(&mut db);
         test_db_get_value(&mut db);
 
         fs::remove_dir_all(path).unwrap();
@@ -169,9 +237,9 @@ mod tests {
     fn test_multi_thread_rocksdb() {
         let path = setup(format!("multi_thread_{}", Uuid::new_v4().to_string()).as_str());
 
-        let mut db = MultiThreadRocksDB::new(&path).unwrap();
+        let mut db = new_scalar_storage(&path, true).unwrap();
 
-        test_db_get_str(&mut db);
+        test_db_multi_get_value(&mut db);
         test_db_get_value(&mut db);
 
         fs::remove_dir_all(path).unwrap();
