@@ -6,7 +6,7 @@ use crate::merror::IndexError;
 pub use flat::FlatIndex;
 pub use hnsw::{HnswIndex, HnswIndexOption};
 use hnsw_rs::hnsw::Neighbour;
-pub use option::{InsertParams, SearchQuery};
+pub use option::{HnswSearchOption, InsertParams, SearchQuery};
 use serde::{Deserialize, Serialize};
 
 pub trait Index {
@@ -15,7 +15,7 @@ pub trait Index {
         -> Result<SearchResult, IndexError>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum IndexType {
     Flat,
     HNSW,

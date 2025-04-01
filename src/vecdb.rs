@@ -1,11 +1,14 @@
+use ndarray::array;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::index::{
-    FlatIndex, HnswIndex, HnswIndexOption, Index, IndexType, InsertParams, MetricType, SearchQuery,
+    FlatIndex, HnswIndex, HnswIndexOption, HnswSearchOption, Index, IndexType, InsertParams,
+    MetricType, SearchQuery,
 };
 use crate::merror::DBError;
 use crate::scalar::{new_scalar_storage, ScalarStorage};
@@ -106,8 +109,151 @@ impl VectorDatabase {
             .search(query, k)
             .map_err(|e| DBError::GetError(format!("unable to query vector data: {}", e)))?;
 
+        println!("search result inside: {:?}", search_result);
+
+        if search_result.labels.is_empty() {
+            return Ok(vec![]);
+        }
+
         let documents = self.scalar_storage.multi_get_value(&search_result.labels)?;
 
         Ok(documents)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn create_test_index_params(metric_type: MetricType, index_type: IndexType) -> IndexParams {
+        IndexParams {
+            dim: 3,
+            metric_type: metric_type,
+            index_type: index_type,
+            hnsw_params: None,
+        }
+    }
+
+    struct TestPath {
+        db_path: PathBuf,
+    }
+
+    impl TestPath {
+        fn new() -> Self {
+            let db_path = PathBuf::from("/tmp/test_db").join(Uuid::new_v4().to_string());
+            fs::create_dir_all(&db_path).unwrap();
+            TestPath { db_path }
+        }
+    }
+
+    impl AsRef<Path> for TestPath {
+        fn as_ref(&self) -> &Path {
+            self.db_path.as_ref()
+        }
+    }
+
+    impl Drop for TestPath {
+        fn drop(&mut self) {
+            if fs::exists(&self.db_path).unwrap() {
+                std::fs::remove_dir_all(&self.db_path).unwrap();
+            }
+        }
+    }
+
+    macro_rules! vecdb_test_cases {
+        ($($name:ident: $index_type:expr, $metric_type: expr)*) => {
+        $(
+            mod $name {
+                use super::*;
+
+                #[test]
+                fn test_vector_database_new() {
+                    let index_params = create_test_index_params($metric_type, $index_type);
+
+                    let result = VectorDatabase::new(TestPath::new(), index_params, false);
+                    assert!(result.is_ok());
+                }
+
+                #[test]
+                fn test_vector_database_upsert() {
+                    let index_params = create_test_index_params($metric_type, $index_type);
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+
+                    let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
+                    let labels = vec![1, 2];
+                    let insert_data = InsertParams::new(&data_array, &labels);
+                    let meta = Some(HashMap::from([(
+                        "key".to_string(),
+                        Value::String("value".to_string()),
+                    )]));
+
+                    let result = db.upsert(1, &insert_data, meta);
+                    assert!(result.is_ok());
+                }
+
+                #[test]
+                fn test_vector_database_query() {
+                    let index_params = create_test_index_params($metric_type, $index_type);
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+
+                    let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
+                    let labels = vec![1, 2];
+                    let insert_data = InsertParams::new(&data_array, &labels);
+                    db.upsert(1, &insert_data, None).unwrap();
+
+                    let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
+                    if $index_type == IndexType::HNSW {
+                        query = query.with(HnswSearchOption {
+                            ef_search: 10,
+                        });
+                    }
+                    let result = db.query(&query, 1);
+                    assert!(result.is_ok());
+                    assert_eq!(result.unwrap().len(), 1);
+                }
+
+                #[test]
+                fn test_vector_database_upsert_with_wrong_dim() {
+                    let index_params = create_test_index_params($metric_type, $index_type);
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+
+                    let data_array = array![[0.1, 0.2, 0.3, 0.4], [0.4, 0.5, 0.6, 0.7]];
+                    let labels = vec![1, 2];
+                    let insert_data = InsertParams::new(&data_array, &labels);
+                    let result = db.upsert(1, &insert_data, None);
+                    assert!(result.is_err());
+
+                    let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
+                    let labels = vec![1, 2, 3];
+                    let insert_data = InsertParams::new(&data_array, &labels);
+                    let result = db.upsert(2, &insert_data, None);
+                    assert!(result.is_err());
+                }
+
+                #[test]
+                fn test_vector_database_query_with_no_results() {
+                    let index_params = create_test_index_params($metric_type, $index_type);
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+
+                    let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
+                    if $index_type == IndexType::HNSW {
+                        query = query.with(HnswSearchOption {
+                            ef_search: 10,
+                        });
+                    }
+                    let result = db.query(&query, 1);
+                    assert!(result.is_ok());
+                    assert!(result.unwrap().is_empty());
+                }
+            }
+        )*
+        };
+    }
+
+    vecdb_test_cases! {
+        flat_l2: IndexType::Flat, MetricType::L2
+        hnsw_l2: IndexType::HNSW, MetricType::L2
+        flat_inner_product: IndexType::Flat, MetricType::IP
+        hnsw_inner_product: IndexType::HNSW, MetricType::IP
     }
 }

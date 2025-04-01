@@ -29,8 +29,8 @@ impl SearchQuery {
         Self { vector, hnsw: None }
     }
 
-    pub fn with(&mut self, option: impl SearchOption) -> &Self {
-        option.set_query(self);
+    pub fn with(mut self, option: impl SearchOption) -> Self {
+        option.set_query(&mut self);
         return self;
     }
 
@@ -62,8 +62,8 @@ impl<'a> InsertParams<'a> {
         }
     }
 
-    pub fn with(&mut self, option: impl InsertOption) -> &Self {
-        option.set_params(self);
+    pub fn with(mut self, option: impl InsertOption) -> Self {
+        option.set_params(&mut self);
         return self;
     }
 }

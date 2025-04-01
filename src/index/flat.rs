@@ -2,6 +2,7 @@ use crate::index::{Index, MetricType, SearchResult};
 use crate::merror::IndexError;
 use faiss::Index as FIndex;
 use faiss::{index_factory, IdMap};
+use std::cmp::min;
 
 use crate::index::option::{InsertParams, SearchQuery};
 
@@ -28,6 +29,22 @@ impl FlatIndex {
 
 impl Index for FlatIndex {
     fn insert(&mut self, params: &InsertParams) -> Result<(), IndexError> {
+        if params.data.nrows() != params.labels.len() {
+            return Err(IndexError::InsertionError(format!(
+                "data rows {} and labels {} do not match",
+                params.data.nrows(),
+                params.labels.len()
+            )));
+        }
+
+        if params.data.ncols() != self.index.d() as usize {
+            return Err(IndexError::InsertionError(format!(
+                "data dimension {} does not match index dimension {}",
+                params.data.ncols(),
+                self.index.d()
+            )));
+        }
+
         let ids = params
             .labels
             .iter()
@@ -50,9 +67,19 @@ impl Index for FlatIndex {
     }
 
     fn search(&mut self, query: &SearchQuery, k: usize) -> Result<SearchResult, IndexError> {
+        // if k is bigger than ntotal, set k to ntotal
+        // othewise faiss will return undefined data
+        let target_k = min(k, self.index.ntotal() as usize);
+        if target_k == 0 {
+            return Ok(SearchResult {
+                distances: vec![],
+                labels: vec![],
+            });
+        }
+
         let search_res = self
             .index
-            .search(query.vector.as_slice(), k)
+            .search(query.vector.as_slice(), target_k)
             .map(SearchResult::from)
             .map_err(|e| IndexError::UnexpectedError(e.to_string()))?;
 
