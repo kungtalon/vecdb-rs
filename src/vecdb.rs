@@ -14,6 +14,7 @@ use crate::merror::DBError;
 use crate::scalar::{new_scalar_storage, ScalarStorage};
 
 pub struct VectorDatabase {
+    #[allow(unused)]
     db_path: PathBuf,
     scalar_storage: Box<dyn ScalarStorage>,
     vector_index: Box<dyn Index>,
@@ -44,7 +45,7 @@ impl VectorDatabase {
                     })?,
                 )
             }
-            IndexType::HNSW => {
+            IndexType::Hnsw => {
                 // Create an HNSW index
                 Box::new(
                     HnswIndex::new(
@@ -62,7 +63,7 @@ impl VectorDatabase {
         Ok(Self {
             db_path,
             scalar_storage,
-            vector_index: vector_index,
+            vector_index,
         })
     }
 
@@ -128,8 +129,8 @@ mod tests {
     fn create_test_index_params(metric_type: MetricType, index_type: IndexType) -> IndexParams {
         IndexParams {
             dim: 3,
-            metric_type: metric_type,
-            index_type: index_type,
+            metric_type,
+            index_type,
             hnsw_params: None,
         }
     }
@@ -202,7 +203,7 @@ mod tests {
                     db.upsert(1, &insert_data, None).unwrap();
 
                     let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
-                    if $index_type == IndexType::HNSW {
+                    if $index_type == IndexType::Hnsw {
                         query = query.with(HnswSearchOption {
                             ef_search: 10,
                         });
@@ -236,7 +237,7 @@ mod tests {
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
                     let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
-                    if $index_type == IndexType::HNSW {
+                    if $index_type == IndexType::Hnsw {
                         query = query.with(HnswSearchOption {
                             ef_search: 10,
                         });
@@ -252,8 +253,8 @@ mod tests {
 
     vecdb_test_cases! {
         flat_l2: IndexType::Flat, MetricType::L2
-        hnsw_l2: IndexType::HNSW, MetricType::L2
+        hnsw_l2: IndexType::Hnsw, MetricType::L2
         flat_inner_product: IndexType::Flat, MetricType::IP
-        hnsw_inner_product: IndexType::HNSW, MetricType::IP
+        hnsw_inner_product: IndexType::Hnsw, MetricType::IP
     }
 }

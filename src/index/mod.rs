@@ -18,7 +18,7 @@ pub trait Index {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum IndexType {
     Flat,
-    HNSW,
+    Hnsw,
 }
 
 #[derive(Debug, Clone, PartialEq)]

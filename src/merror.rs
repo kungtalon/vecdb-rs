@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(unused, clippy::enum_variant_names)]
 pub enum DBError {
     #[error("failed to create database: {0}")]
     CreateError(String),
@@ -15,6 +16,7 @@ pub enum DBError {
 }
 
 #[derive(Error, Debug)]
+#[allow(unused, clippy::enum_variant_names)]
 pub enum IndexError {
     #[error("failed to initialize new index: {0}")]
     InitializationError(String),

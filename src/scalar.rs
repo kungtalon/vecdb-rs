@@ -5,7 +5,7 @@ use rocksdb::{Options, DB};
 use serde_json::Value;
 use std::path::Path;
 
-type MDB = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
+type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
 pub trait ScalarStorage {
     fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError>;
@@ -99,14 +99,14 @@ impl ScalarStorage for SingleThreadRocksDB {
 }
 
 struct MultiThreadRocksDB {
-    db: MDB,
+    db: Mdb,
 }
 
 impl MultiThreadRocksDB {
     fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
         let mut options = Options::default();
         options.create_if_missing(true);
-        let db = MDB::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
+        let db = Mdb::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
         Ok(MultiThreadRocksDB { db })
     }
 }
@@ -172,7 +172,7 @@ mod tests {
 
         fs::create_dir_all(&db_path).expect("failed to create test directory");
 
-        return db_path;
+        db_path
     }
 
     fn test_db_multi_get_value(db: &mut Box<dyn ScalarStorage>) {
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_single_thread_rocksdb() {
-        let path = setup(format!("single_thread_{}", Uuid::new_v4().to_string()).as_str());
+        let path = setup(format!("single_thread_{}", Uuid::new_v4()).as_str());
 
         let mut db = new_scalar_storage(&path, false).unwrap();
 
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_multi_thread_rocksdb() {
-        let path = setup(format!("multi_thread_{}", Uuid::new_v4().to_string()).as_str());
+        let path = setup(format!("multi_thread_{}", Uuid::new_v4()).as_str());
 
         let mut db = new_scalar_storage(&path, true).unwrap();
 

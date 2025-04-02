@@ -1,7 +1,11 @@
+use core::alloc;
+
+use crate::filter::IdFilter;
 use crate::index::{Index, MetricType, SearchResult};
 use crate::merror::IndexError;
 use anndists::dist::{distances, Distance};
 use hnsw_rs::api::{self as hnsw_api, AnnT};
+use hnsw_rs::filter::FilterT;
 use hnsw_rs::hnsw;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -32,14 +36,32 @@ fn read_hnsw_config_from_env(name: &str, default: u32) -> u32 {
 
 pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> {
     fn get_nb_point(&self) -> usize;
+
+    fn search_filter(
+        &self,
+        data: &[FT],
+        knbn: usize,
+        ef_arg: usize,
+        filter: &dyn IdFilter,
+    ) -> Vec<hnsw::Neighbour>;
 }
 
-impl<'a, D> HnswIndexTrait for hnsw::Hnsw<'a, FT, D>
+impl<D> HnswIndexTrait for hnsw::Hnsw<'_, FT, D>
 where
     D: Distance<FT> + Send + Sync + 'static,
 {
     fn get_nb_point(&self) -> usize {
         self.get_nb_point()
+    }
+
+    fn search_filter(
+        &self,
+        data: &[FT],
+        knbn: usize,
+        ef_arg: usize,
+        filter: &dyn IdFilter,
+    ) -> Vec<hnsw::Neighbour> {
+        self.search_filter(data, knbn, ef_arg, Some(&Box::new(filter)))
     }
 }
 
@@ -74,13 +96,13 @@ impl From<HnswIndexOption> for HnswIndexSetting {
     }
 }
 
-impl Into<Option<HnswIndexOption>> for HnswIndexSetting {
-    fn into(self) -> Option<HnswIndexOption> {
+impl From<HnswIndexSetting> for Option<HnswIndexOption> {
+    fn from(setting: HnswIndexSetting) -> Self {
         Some(HnswIndexOption {
-            ef_construction: Some(self.ef_construction),
-            max_elements: Some(self.max_elements),
-            max_nb_connection: Some(self.max_nb_connection),
-            max_layer: Some(self.max_layer),
+            ef_construction: Some(setting.ef_construction),
+            max_elements: Some(setting.max_elements),
+            max_nb_connection: Some(setting.max_nb_connection),
+            max_layer: Some(setting.max_layer),
         })
     }
 }
@@ -120,7 +142,7 @@ impl HnswIndex {
 
         Ok(Self {
             index: index_box,
-            dim: dim,
+            dim,
         })
     }
 }
@@ -153,8 +175,8 @@ impl Index for HnswIndex {
         if params.hnsw_params.is_some() && params.hnsw_params.as_ref().unwrap().parallel {
             let mut zipped_data_labels = Vec::<(&Vec<FT>, usize)>::new();
 
-            for i in 0..zipped_params.len() {
-                zipped_data_labels.push((&zipped_params[i].0, zipped_params[i].1));
+            for (data, label) in zipped_params.iter() {
+                zipped_data_labels.push((data, *label));
             }
 
             self.index

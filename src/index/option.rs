@@ -10,7 +10,7 @@ pub struct SearchQuery {
 }
 
 pub trait SearchOption {
-    fn set_query(&self, query: &mut SearchQuery) -> ();
+    fn set_query(&self, query: &mut SearchQuery);
 }
 
 #[derive(Debug, Clone)]
@@ -19,7 +19,7 @@ pub struct HnswSearchOption {
 }
 
 impl SearchOption for HnswSearchOption {
-    fn set_query(&self, query: &mut SearchQuery) -> () {
+    fn set_query(&self, query: &mut SearchQuery) {
         query.hnsw = Some(self.clone());
     }
 }
@@ -31,13 +31,15 @@ impl SearchQuery {
 
     pub fn with(mut self, option: impl SearchOption) -> Self {
         option.set_query(&mut self);
-        return self;
+        self
     }
 
     pub fn get_hnsw(&self) -> Result<&HnswSearchOption, IndexError> {
-        Ok(self.hnsw.as_ref().ok_or(IndexError::QueryError(
+        let result = self.hnsw.as_ref().ok_or(IndexError::QueryError(
             "HNSW search option is not set".to_string(),
-        ))?)
+        ))?;
+
+        Ok(result)
     }
 }
 
@@ -64,16 +66,16 @@ impl<'a> InsertParams<'a> {
 
     pub fn with(mut self, option: impl InsertOption) -> Self {
         option.set_params(&mut self);
-        return self;
+        self
     }
 }
 
 pub trait InsertOption {
-    fn set_params(self, params: &mut InsertParams) -> ();
+    fn set_params(self, params: &mut InsertParams);
 }
 
 impl InsertOption for HnswParams {
-    fn set_params(self, params: &mut InsertParams) -> () {
+    fn set_params(self, params: &mut InsertParams) {
         params.hnsw_params = Some(self);
     }
 }

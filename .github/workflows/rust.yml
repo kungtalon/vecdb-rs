@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CMAKE_VERSION: 3.31.4
+  LLVM_VERSION: 16.0
 
 jobs:
   ci:
@@ -21,23 +22,22 @@ jobs:
     - name: Download Build Toolkits
       run: sudo apt-get install -y build-essential wget curl
     - name: Download LLVM
-      run: |
-        sudo apt-get install -y lsb-release software-properties-common gnupg
-        sudo bash -c "$(wget -O - https://apt.llvm.org/llvm.sh)"
-        ln -s /usr/bin/clang-19 /usr/local/bin/clang
+      uses: KyleMayes/install-llvm-action@v1
+      with:
+        version: "${{ env.LLVM_VERSION }}"
     - name: Download OpenBlas Lib
       run: sudo apt-get install -y libblas-dev liblapack-dev
     - name: Download CMake
-      run: |
-        wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz -O /tmp/cmake.tgz;
-        gunzip < /tmp/cmake.tgz | tar -xf - -C /tmp/;
-        sudo mv /tmp/cmake-${CMAKE_VERSION}-* /usr/local/cmake;
-        sudo ln -sf /usr/local/cmake/bin/cmake /usr/local/bin/cmake
-    - name: Download Rust
-      run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        ln -s "$HOME/.cargo/bin/cargo" /usr/local/bin/cargo
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: "${{ env.CMAKE_VERSION }}"
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
     - name: Rust Build
       run: cargo build --verbose
+    - name: Rust Lint
+      run: RUSTFLAGS="-A unused" cargo clippy --all-targets --all-features -- -D warnings
     - name: Run Tests
       run: cargo test --verbose
