@@ -14,7 +14,6 @@ use crate::merror::DBError;
 use crate::scalar::{new_scalar_storage, ScalarStorage};
 
 pub struct VectorDatabase {
-    #[allow(unused)]
     db_path: PathBuf,
     scalar_storage: Box<dyn ScalarStorage>,
     vector_index: Box<dyn Index>,
@@ -71,30 +70,30 @@ impl VectorDatabase {
         &mut self,
         id: u64,
         insert_data: &InsertParams,
-        meta: Option<HashMap<String, Value>>,
+        doc: Option<HashMap<String, Value>>,
     ) -> Result<(), DBError> {
         self.vector_index
             .insert(insert_data)
             .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))?;
 
-        let mut meta_map: HashMap<String, Value>;
+        let mut doc_map: HashMap<String, Value>;
 
-        match meta {
+        match doc {
             Some(m) => {
-                meta_map = m;
+                doc_map = m;
             }
             None => {
-                meta_map = HashMap::new();
+                doc_map = HashMap::new();
             }
         }
 
-        meta_map.insert("id".to_string(), Value::Number(id.into()));
+        doc_map.insert("id".to_string(), Value::Number(id.into()));
 
-        let meta_bytes = serde_json::to_vec(&meta_map)
-            .map_err(|e| DBError::PutError(format!("unable to serialize meta data: {}", e)))?;
+        let doc_bytes = serde_json::to_vec(&doc_map)
+            .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
 
         self.scalar_storage
-            .put(id, &meta_bytes)
+            .put(id, &doc_bytes)
             .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
 
         Ok(())
@@ -183,12 +182,12 @@ mod tests {
                     let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
                     let labels = vec![1, 2];
                     let insert_data = InsertParams::new(&data_array, &labels);
-                    let meta = Some(HashMap::from([(
+                    let doc = Some(HashMap::from([(
                         "key".to_string(),
                         Value::String("value".to_string()),
                     )]));
 
-                    let result = db.upsert(1, &insert_data, meta);
+                    let result = db.upsert(1, &insert_data, doc);
                     assert!(result.is_ok());
                 }
 
@@ -204,7 +203,7 @@ mod tests {
 
                     let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
                     if $index_type == IndexType::Hnsw {
-                        query = query.with(HnswSearchOption {
+                        query = query.with(&HnswSearchOption {
                             ef_search: 10,
                         });
                     }
@@ -238,7 +237,23 @@ mod tests {
 
                     let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
                     if $index_type == IndexType::Hnsw {
-                        query = query.with(HnswSearchOption {
+                        query = query.with(&HnswSearchOption {
+                            ef_search: 10,
+                        });
+                    }
+                    let result = db.query(&query, 1);
+                    assert!(result.is_ok());
+                    assert!(result.unwrap().is_empty());
+                }
+
+                #[test]
+                fn test_vector_database_query_with_filter() {
+                    let index_params = create_test_index_params($metric_type, $index_type);
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+
+                    let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
+                    if $index_type == IndexType::Hnsw {
+                        query = query.with(&HnswSearchOption {
                             ef_search: 10,
                         });
                     }

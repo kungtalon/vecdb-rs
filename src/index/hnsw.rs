@@ -1,6 +1,7 @@
 use core::alloc;
 
 use crate::filter::IdFilter;
+use crate::index::option::{InsertParams, SearchQuery};
 use crate::index::{Index, MetricType, SearchResult};
 use crate::merror::IndexError;
 use anndists::dist::{distances, Distance};
@@ -42,7 +43,7 @@ pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> {
         data: &[FT],
         knbn: usize,
         ef_arg: usize,
-        filter: &dyn IdFilter,
+        filter: &IdFilter,
     ) -> Vec<hnsw::Neighbour>;
 }
 
@@ -59,9 +60,9 @@ where
         data: &[FT],
         knbn: usize,
         ef_arg: usize,
-        filter: &dyn IdFilter,
+        filter: &IdFilter,
     ) -> Vec<hnsw::Neighbour> {
-        self.search_filter(data, knbn, ef_arg, Some(&Box::new(filter)))
+        self.search_filter(data, knbn, ef_arg, Some(filter))
     }
 }
 
@@ -148,7 +149,7 @@ impl HnswIndex {
 }
 
 impl Index for HnswIndex {
-    fn insert(&mut self, params: &crate::index::option::InsertParams) -> Result<(), IndexError> {
+    fn insert(&mut self, params: &InsertParams) -> Result<(), IndexError> {
         if params.data.nrows() != params.labels.len() {
             return Err(IndexError::InsertionError(format!(
                 "Data and labels length mismatch: {} != {}",
@@ -191,12 +192,16 @@ impl Index for HnswIndex {
         Ok(())
     }
 
-    fn search(
-        &mut self,
-        query: &crate::index::option::SearchQuery,
-        k: usize,
-    ) -> Result<SearchResult, IndexError> {
+    fn search(&mut self, query: &SearchQuery, k: usize) -> Result<SearchResult, IndexError> {
         let hnsw_opt = query.get_hnsw()?;
+
+        if let Some(filter) = &query.id_filter {
+            let neighbours =
+                self.index
+                    .search_filter(&query.vector, k, hnsw_opt.ef_search as usize, filter);
+
+            return Ok(SearchResult::from(neighbours));
+        }
 
         let neighbours =
             self.index
@@ -215,12 +220,10 @@ mod tests {
 
     use crate::index::option::{HnswParams, InsertParams, SearchQuery};
 
-    #[test]
-    fn test_insert_many() {
-        let dim = 4;
-        let mut index = HnswIndex::new(
+    fn setup(nrow: u32, dim: u32, metric_type: MetricType) -> (HnswIndex, NMatrix<f32>, Vec<u64>) {
+        let index = HnswIndex::new(
             dim,
-            MetricType::L2,
+            metric_type,
             HnswIndexSetting {
                 ef_construction: 20,
                 max_elements: 100,
@@ -231,8 +234,12 @@ mod tests {
         )
         .expect("Failed to initialize index");
 
-        let data_from_vec =
-            NMatrix::from_shape_vec((2, 4), vec![1.0, 2.0, 3.0, 4.0, -1.0, 2.0, -3.0, 4.0]);
+        let data_from_vec = NMatrix::from_shape_vec(
+            (nrow as usize, dim as usize),
+            (1..(dim * nrow + 1))
+                .map(|e| e as f32)
+                .collect::<Vec<f32>>(),
+        );
         assert!(
             data_from_vec.is_ok(),
             "got error from converting vecs into matrix {:?}",
@@ -240,7 +247,15 @@ mod tests {
         );
         let data = data_from_vec.unwrap();
 
-        let labels = vec![42, 47];
+        let labels = (1u64..(nrow + 1) as u64).collect::<Vec<u64>>();
+
+        (index, data, labels)
+    }
+
+    #[test]
+    fn test_insert_many() {
+        let (mut index, data, labels) = setup(2, 4, MetricType::L2);
+
         use crate::index::option::InsertParams;
         let insert_result =
             index.insert(&InsertParams::new(&data, &labels).with(HnswParams { parallel: true }));
@@ -251,37 +266,14 @@ mod tests {
 
     #[test]
     fn test_search() {
-        let dim = 4;
-        let mut index = HnswIndex::new(
-            dim,
-            MetricType::L2,
-            HnswIndexSetting {
-                ef_construction: 200,
-                max_elements: 100,
-                max_nb_connection: 100,
-                max_layer: 16,
-            }
-            .into(),
-        )
-        .expect("Failed to initialize index");
-
-        let data_from_vec =
-            NMatrix::from_shape_vec((2, 4), vec![1.0, 2.0, 3.0, 4.0, -1.0, 2.0, -3.0, 4.0]);
-        assert!(
-            data_from_vec.is_ok(),
-            "error from converting vecs into matrix {:?}",
-            data_from_vec.err()
-        );
-        let data = data_from_vec.unwrap();
-
-        let labels = vec![42, 47];
+        let (mut index, data, labels) = setup(2, 4, MetricType::L2);
         let insert_result = index.insert(&InsertParams::new(&data, &labels));
         assert!(insert_result.is_ok());
 
         let query = vec![1.1, 2.1, 2.9, 3.9];
         let k: usize = 2;
         let result = index.search(
-            &SearchQuery::new(query).with(HnswSearchOption { ef_search: 20 }),
+            &SearchQuery::new(query).with(&HnswSearchOption { ef_search: 20 }),
             k,
         );
 
@@ -290,5 +282,39 @@ mod tests {
         println!("{:?}", search_result);
         assert_eq!(search_result.labels.len(), k);
         assert_eq!(search_result.labels[0], labels[0]);
+    }
+
+    #[test]
+    fn test_search_with_filter() {
+        let (mut index, data, labels) = setup(4, 5, MetricType::L2);
+        let insert_result = index.insert(&InsertParams::new(&data, &labels));
+        assert!(insert_result.is_ok());
+
+        let query = vec![1.1, 2.1, 2.9, 3.9, 5.0];
+        let k: usize = 3;
+        let original_result = index.search(
+            &SearchQuery::new(query.clone()).with(&HnswSearchOption { ef_search: 20 }),
+            k,
+        );
+        assert!(
+            original_result.is_ok(),
+            "error from search {:?}",
+            original_result.err()
+        );
+        assert_eq!(original_result.unwrap().labels[0], labels[0]);
+
+        let mut filter = IdFilter::new();
+        filter.add_all(&labels[1..]);
+        let result = index.search(
+            &SearchQuery::new(query)
+                .with(&HnswSearchOption { ef_search: 20 })
+                .with(&filter),
+            k,
+        );
+
+        assert!(result.is_ok(), "error from search {:?}", result.err());
+        let search_result = result.unwrap();
+        assert_eq!(search_result.labels.len(), k);
+        assert_ne!(search_result.labels[0], labels[0]);
     }
 }

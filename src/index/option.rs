@@ -1,10 +1,11 @@
 use ndarray::Array2 as NMatrix;
 
-use crate::merror::IndexError;
+use crate::{filter::IdFilter, merror::IndexError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SearchQuery {
     pub vector: Vec<f32>,
+    pub id_filter: Option<IdFilter>,
 
     hnsw: Option<HnswSearchOption>,
 }
@@ -24,12 +25,22 @@ impl SearchOption for HnswSearchOption {
     }
 }
 
+impl SearchOption for IdFilter {
+    fn set_query(&self, query: &mut SearchQuery) {
+        query.id_filter = Some(self.clone());
+    }
+}
+
 impl SearchQuery {
     pub fn new(vector: Vec<f32>) -> Self {
-        Self { vector, hnsw: None }
+        Self {
+            vector,
+            hnsw: None,
+            id_filter: None,
+        }
     }
 
-    pub fn with(mut self, option: impl SearchOption) -> Self {
+    pub fn with(mut self, option: &dyn SearchOption) -> Self {
         option.set_query(&mut self);
         self
     }
@@ -77,5 +88,25 @@ pub trait InsertOption {
 impl InsertOption for HnswParams {
     fn set_params(self, params: &mut InsertParams) {
         params.hnsw_params = Some(self);
+    }
+}
+
+struct MyStruct<'a> {
+    data: &'a str, // A reference field with a limited lifetime
+}
+
+impl<'a> MyStruct<'a> {
+    // Constructor
+    fn new(data: &'a str) -> Self {
+        Self { data }
+    }
+
+    // Setter method to update the reference field
+    fn set_data(&mut self, new_data: &'a str) {
+        self.data = new_data;
+    }
+
+    fn get_data(&self) -> &str {
+        self.data
     }
 }
