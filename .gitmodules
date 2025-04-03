@@ -1,3 +1,4 @@
 [submodule "faiss-rs"]
 	path = faiss-rs
-	url = git@github.com:kungtalon/faiss-rs.git
+	url = https://github.com/kungtalon/faiss-rs.git
+	branch = add_search_filter
