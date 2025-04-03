@@ -31,6 +31,8 @@ jobs:
       uses: jwlawson/actions-setup-cmake@v2
       with:
         cmake-version: "${{ env.CMAKE_VERSION }}"
+    - name: Pull Submodule
+      run: git submodule update --init --recursive .
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
