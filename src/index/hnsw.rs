@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_filter() {
+    fn test_search_with_params() {
         let (mut index, data, labels) = setup(4, 5, MetricType::L2);
         let insert_result = index.insert(&InsertParams::new(&data, &labels));
         assert!(insert_result.is_ok());

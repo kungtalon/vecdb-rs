@@ -81,7 +81,7 @@ impl Index for FlatIndex {
         if let Some(filter) = &query.id_filter {
             search_res = self
                 .index
-                .search_with_filter(query.vector.as_slice(), target_k, &filter.into_selector())
+                .search_with_params(query.vector.as_slice(), target_k, &filter.into_selector())
                 .map(SearchResult::from)
                 .map_err(|e| IndexError::UnexpectedError(e.to_string()))?;
 
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_search_with_filter() {
+    fn test_search_with_params() {
         let (mut index, data, labels) = setup(4, 5, MetricType::L2);
         let insert_result = index.insert(&InsertParams::new(&data, &labels));
         assert!(
