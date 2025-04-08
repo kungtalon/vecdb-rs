@@ -27,7 +27,7 @@ impl IdFilter {
         self.0.contains(*id as u32)
     }
 
-    pub fn into_selector(&self) -> IdSelector {
+    pub fn as_selector(&self) -> IdSelector {
         IdSelector::batch(
             &self
                 .0
