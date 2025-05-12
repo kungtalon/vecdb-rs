@@ -1,7 +1,10 @@
+mod index;
+
 use faiss::index::Idx;
 use faiss::selector::IdSelector;
 use hnsw_rs::hnsw::FilterT;
 use hnsw_rs::prelude::DataId;
+pub use index::{FilterOp, IntFilterIndex, IntFilterInput};
 use roaring::RoaringBitmap;
 use std::fmt::Debug;
 
@@ -11,6 +14,10 @@ pub struct IdFilter(RoaringBitmap);
 impl IdFilter {
     pub fn new() -> Self {
         Self(RoaringBitmap::new())
+    }
+
+    pub fn from(bitmap: RoaringBitmap) -> Self {
+        Self(bitmap)
     }
 
     pub fn add(&mut self, id: u64) {

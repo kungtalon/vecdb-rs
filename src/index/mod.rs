@@ -6,7 +6,7 @@ use crate::merror::IndexError;
 pub use flat::FlatIndex;
 pub use hnsw::{HnswIndex, HnswIndexOption};
 use hnsw_rs::hnsw::Neighbour;
-pub use option::{HnswSearchOption, InsertParams, SearchQuery};
+pub use option::{HnswParams, HnswSearchOption, InsertParams, SearchQuery};
 use serde::{Deserialize, Serialize};
 
 pub trait Index {
@@ -29,9 +29,16 @@ pub struct SearchResult {
 
 impl From<faiss::index::SearchResult> for SearchResult {
     fn from(value: faiss::index::SearchResult) -> Self {
+        // should filter out the invalid labels
+        let labels = value
+            .labels
+            .into_iter()
+            .filter_map(|i| i.get())
+            .collect::<Vec<u64>>();
+
         Self {
-            distances: value.distances,
-            labels: value.labels.iter().map(|i| i.to_native() as u64).collect(),
+            distances: value.distances[..labels.len()].to_vec(),
+            labels,
         }
     }
 }

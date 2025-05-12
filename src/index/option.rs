@@ -2,9 +2,11 @@ use ndarray::Array2 as NMatrix;
 
 use crate::{filter::IdFilter, merror::IndexError};
 
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug)]
-pub struct SearchQuery {
-    pub vector: Vec<f32>,
+pub struct SearchQuery<'a> {
+    pub vector: &'a Vec<f32>,
     pub id_filter: Option<IdFilter>,
 
     hnsw: Option<HnswSearchOption>,
@@ -14,7 +16,7 @@ pub trait SearchOption {
     fn set_query(&self, query: &mut SearchQuery);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswSearchOption {
     pub ef_search: u32,
 }
@@ -31,8 +33,8 @@ impl SearchOption for IdFilter {
     }
 }
 
-impl SearchQuery {
-    pub fn new(vector: Vec<f32>) -> Self {
+impl<'a> SearchQuery<'a> {
+    pub fn new(vector: &'a Vec<f32>) -> Self {
         Self {
             vector,
             hnsw: None,
@@ -54,14 +56,15 @@ impl SearchQuery {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct InsertParams<'a> {
     pub data: &'a NMatrix<f32>,
     pub labels: &'a Vec<u64>,
 
-    pub(crate) hnsw_params: Option<HnswParams>,
+    pub hnsw_params: Option<HnswParams>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswParams {
     pub parallel: bool,
 }
@@ -88,6 +91,18 @@ pub trait InsertOption {
 impl InsertOption for HnswParams {
     fn set_params(self, params: &mut InsertParams) {
         params.hnsw_params = Some(self);
+    }
+}
+
+// to make it easier to set params without unwrapping option
+impl<T> InsertOption for Option<T>
+where
+    T: InsertOption,
+{
+    fn set_params(self, params: &mut InsertParams) {
+        if let Some(p) = self {
+            p.set_params(params);
+        }
     }
 }
 

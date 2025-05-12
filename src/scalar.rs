@@ -7,6 +7,8 @@ use std::path::Path;
 
 type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
+const KEY_ID_MAX: &str = "__id_max__";
+
 pub trait ScalarStorage {
     fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError>;
 
@@ -24,6 +26,9 @@ pub trait ScalarStorage {
     }
 
     fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError>;
+
+    // Generates a list of unique IDs starting from the last ID used
+    fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError>;
 }
 
 pub fn new_scalar_storage<P: AsRef<Path>>(
@@ -96,9 +101,14 @@ impl ScalarStorage for SingleThreadRocksDB {
 
         Ok(result)
     }
+
+    fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError> {
+        gen_incr_ids(&mut self.db, num)
+    }
 }
 
 struct MultiThreadRocksDB {
+    mutex: std::sync::Mutex<()>,
     db: Mdb,
 }
 
@@ -107,7 +117,10 @@ impl MultiThreadRocksDB {
         let mut options = Options::default();
         options.create_if_missing(true);
         let db = Mdb::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
-        Ok(MultiThreadRocksDB { db })
+        Ok(MultiThreadRocksDB {
+            db,
+            mutex: std::sync::Mutex::new(()),
+        })
     }
 }
 
@@ -154,6 +167,42 @@ impl ScalarStorage for MultiThreadRocksDB {
 
         Ok(result)
     }
+
+    fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError> {
+        let _guard = self
+            .mutex
+            .lock()
+            .map_err(|e| DBError::GetError(format!("failed to lock mutex: {:?}", e)))?;
+
+        gen_incr_ids(&mut self.db, num)
+    }
+}
+
+fn gen_incr_ids<T: rocksdb::ThreadMode>(
+    db: &mut rocksdb::DBWithThreadMode<T>,
+    num: usize,
+) -> Result<Vec<u64>, DBError> {
+    let max_id_as_bytes = db
+        .get(KEY_ID_MAX.as_bytes())
+        .map_err(|e| DBError::GetError(e.to_string()))?;
+
+    let max_id: u64 = match max_id_as_bytes {
+        Some(bytes) => u64::from_be_bytes(bytes.try_into().map_err(|e| {
+            DBError::GetError(format!("failed to convert incr ID as u64: {:?}", e))
+        })?),
+        None => 0,
+    };
+
+    let new_max_id = max_id + num as u64;
+
+    let ids: Vec<u64> = (max_id + 1..new_max_id + 1).collect::<Vec<u64>>();
+
+    db.put(KEY_ID_MAX.as_bytes(), new_max_id.to_be_bytes())
+        .map_err(|e| {
+            DBError::PutError(format!("failed to insert new generated max id: {:?}", e))
+        })?;
+
+    Ok(ids)
 }
 
 #[cfg(test)]

@@ -273,7 +273,7 @@ mod tests {
         let query = vec![1.1, 2.1, 2.9, 3.9];
         let k: usize = 2;
         let result = index.search(
-            &SearchQuery::new(query).with(&HnswSearchOption { ef_search: 20 }),
+            &SearchQuery::new(&query).with(&HnswSearchOption { ef_search: 20 }),
             k,
         );
 
@@ -293,7 +293,7 @@ mod tests {
         let query = vec![1.1, 2.1, 2.9, 3.9, 5.0];
         let k: usize = 3;
         let original_result = index.search(
-            &SearchQuery::new(query.clone()).with(&HnswSearchOption { ef_search: 20 }),
+            &SearchQuery::new(&query.clone()).with(&HnswSearchOption { ef_search: 20 }),
             k,
         );
         assert!(
@@ -306,7 +306,7 @@ mod tests {
         let mut filter = IdFilter::new();
         filter.add_all(&labels[1..]);
         let result = index.search(
-            &SearchQuery::new(query)
+            &SearchQuery::new(&query)
                 .with(&HnswSearchOption { ef_search: 20 })
                 .with(&filter),
             k,

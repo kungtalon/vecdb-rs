@@ -1,22 +1,25 @@
-use ndarray::array;
+use hnsw_rs::hnsw;
+use ndarray::{array, Array};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::vec;
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::index::{
-    FlatIndex, HnswIndex, HnswIndexOption, HnswSearchOption, Index, IndexType, InsertParams,
-    MetricType, SearchQuery,
-};
+use crate::filter::{FilterOp, IdFilter, IntFilterIndex, IntFilterInput};
+use crate::index::*;
 use crate::merror::DBError;
 use crate::scalar::{new_scalar_storage, ScalarStorage};
+
+pub type DocMap = HashMap<String, Value>;
 
 pub struct VectorDatabase {
     db_path: PathBuf,
     scalar_storage: Box<dyn ScalarStorage>,
     vector_index: Box<dyn Index>,
+    filter_index: IntFilterIndex,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -25,6 +28,26 @@ pub struct IndexParams {
     metric_type: MetricType,
     index_type: IndexType,
     hnsw_params: Option<HnswIndexOption>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VectorInsertArgs {
+    pub flat_data: Vec<f32>,
+    pub data_row: usize,
+    pub data_dim: usize,
+    pub docs: Vec<Option<DocMap>>,
+    pub attributes: Vec<Option<HashMap<String, Value>>>,
+
+    pub hnsw_params: Option<HnswParams>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VectorSearchArgs {
+    pub query: Vec<f32>,
+    pub k: usize,
+    pub filter_inputs: Option<Vec<IntFilterInput>>,
+
+    pub hnsw_params: Option<HnswSearchOption>,
 }
 
 impl VectorDatabase {
@@ -63,33 +86,57 @@ impl VectorDatabase {
             db_path,
             scalar_storage,
             vector_index,
+            filter_index: IntFilterIndex::new(),
         })
     }
 
-    pub fn upsert(
-        &mut self,
-        id: u64,
-        insert_data: &InsertParams,
-        doc: Option<HashMap<String, Value>>,
-    ) -> Result<(), DBError> {
+    fn upsert(&mut self, args: VectorInsertArgs) -> Result<(), DBError> {
+        let (mismatch_field, mismatch_value, expect_value) = args.validate();
+
+        if !mismatch_field.is_empty() {
+            return Err(DBError::PutError(format!(
+                "unexpected length of field {}: {}, expected length is {}",
+                mismatch_field, mismatch_value, expect_value,
+            )));
+        }
+
+        let insert_data = Array::from_shape_vec((args.data_row, args.data_dim), args.flat_data)
+            .map_err(|e| {
+                DBError::PutError(format!("unable to create array from flat data: {}", e))
+            })?;
+
+        let ids = self.scalar_storage.gen_incr_ids(args.data_row)?;
+
+        let mut index_insert_params = InsertParams::new(&insert_data, &ids);
+        if args.hnsw_params.is_some() {
+            index_insert_params = index_insert_params.with(args.hnsw_params.unwrap());
+        }
+
         self.vector_index
-            .insert(insert_data)
+            .insert(&index_insert_params)
             .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))?;
 
-        let mut doc_map: HashMap<String, Value>;
+        for (i, doc) in args.docs.iter().enumerate() {
+            let mut doc_map = match doc {
+                Some(m) => m.clone().to_owned(),
+                None => HashMap::new(),
+            };
+            self.insert_doc(&mut doc_map, ids[i])?;
+        }
 
-        match doc {
-            Some(m) => {
-                doc_map = m;
-            }
-            None => {
-                doc_map = HashMap::new();
+        for (i, attr) in args.attributes.iter().enumerate() {
+            if let Some(attr_map) = attr {
+                self.insert_attribute(attr_map, ids[i])?;
             }
         }
 
-        doc_map.insert("id".to_string(), Value::Number(id.into()));
+        Ok(())
+    }
 
-        let doc_bytes = serde_json::to_vec(&doc_map)
+    fn insert_doc(&mut self, doc: &mut DocMap, id: u64) -> Result<(), DBError> {
+        doc.insert("id".to_string(), Value::Number(id.into()));
+
+        let doc_bytes = serde_json::to_vec(&doc)
             .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
 
         self.scalar_storage
@@ -99,14 +146,45 @@ impl VectorDatabase {
         Ok(())
     }
 
+    fn insert_attribute(&mut self, attr: &HashMap<String, Value>, id: u64) -> Result<(), DBError> {
+        for (key, value) in attr {
+            match value {
+                Value::Number(num) => {
+                    if let Some(num) = num.as_i64() {
+                        self.filter_index.upsert(&key, num, id);
+                    }
+                }
+                _ => {
+                    return Err(DBError::PutError(format!(
+                        "unsupported attribute type for key {}: {:?}",
+                        key, value
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn query(
         &mut self,
-        query: &SearchQuery,
-        k: usize,
-    ) -> Result<Vec<HashMap<String, Value>>, DBError> {
+        search_args: VectorSearchArgs, // should not use SearchQuery here
+    ) -> Result<Vec<DocMap>, DBError> {
+        let mut query = SearchQuery::new(&search_args.query);
+        if search_args.hnsw_params.is_some() {
+            query = query.with(search_args.hnsw_params.as_ref().unwrap());
+        }
+        if search_args.filter_inputs.is_some() {
+            let mut bitmap = roaring::RoaringBitmap::new();
+            for filter in search_args.filter_inputs.unwrap() {
+                bitmap = self.filter_index.apply(&filter, &bitmap);
+            }
+            query = query.with(&IdFilter::from(bitmap));
+        }
+
         let search_result = self
             .vector_index
-            .search(query, k)
+            .search(&query, search_args.k)
             .map_err(|e| DBError::GetError(format!("unable to query vector data: {}", e)))?;
 
         println!("search result inside: {:?}", search_result);
@@ -120,6 +198,29 @@ impl VectorDatabase {
         Ok(documents)
     }
 }
+
+impl VectorInsertArgs {
+    fn validate(&self) -> (&str, usize, usize) {
+        if self.docs.len() != self.data_row {
+            return ("docs", self.docs.len(), self.data_row);
+        }
+
+        if !self.attributes.is_empty() && self.attributes.len() != self.data_row {
+            return ("attributes", self.attributes.len(), self.data_row);
+        }
+
+        if self.data_dim * self.data_row != self.flat_data.len() {
+            return (
+                "flat_data",
+                self.flat_data.len(),
+                self.data_dim * self.data_row,
+            );
+        }
+
+        ("", 0, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +261,21 @@ mod tests {
         }
     }
 
+    fn standardize_vecs(
+        matrix: &Array<f32, ndarray::Dim<[usize; 2]>>,
+    ) -> Array<f32, ndarray::Dim<[usize; 2]>> {
+        let mut result = matrix.clone();
+
+        for i in 0..matrix.shape()[0] {
+            let row = matrix.row(i);
+            let norm = row.dot(&row).sqrt();
+
+            result.row_mut(i).assign(&row.map(|x| x / norm));
+        }
+
+        result
+    }
+
     macro_rules! vecdb_test_cases {
         ($($name:ident: $index_type:expr, $metric_type: expr)*) => {
         $(
@@ -179,15 +295,20 @@ mod tests {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
-                    let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
-                    let labels = vec![1, 2];
-                    let insert_data = InsertParams::new(&data_array, &labels);
-                    let doc = Some(HashMap::from([(
+                    let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
+                    let doc = HashMap::from([(
                         "key".to_string(),
                         Value::String("value".to_string()),
-                    )]));
+                    )]);
 
-                    let result = db.upsert(1, &insert_data, doc);
+                    let result = db.upsert(VectorInsertArgs{
+                        flat_data: data_array.iter().map(|x| *x).collect(),
+                        data_row: 2,
+                        data_dim: 3,
+                        docs: vec![Some(doc.clone()), Some(doc.clone())],
+                        attributes: vec![],
+                        hnsw_params: None,
+                    });
                     assert!(result.is_ok());
                 }
 
@@ -196,20 +317,44 @@ mod tests {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
-                    let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
-                    let labels = vec![1, 2];
-                    let insert_data = InsertParams::new(&data_array, &labels);
-                    db.upsert(1, &insert_data, None).unwrap();
+                    let doc1 = HashMap::from([(
+                        "key".to_string(),
+                        Value::String("value1".to_string()),
+                    )]);
 
-                    let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
+                    let doc2 = HashMap::from([(
+                        "key".to_string(),
+                        Value::String("value2".to_string()),
+                    )]);
+
+                    let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
+                    let res = db.upsert(VectorInsertArgs{
+                        flat_data: data_array.iter().map(|x| *x).collect(),
+                        data_row: 2,
+                        data_dim: 3,
+                        docs: vec![Some(doc1.clone()), Some(doc2)],
+                        attributes: vec![],
+                        hnsw_params: None,
+                    });
+
+                    assert!(res.is_ok(), "upsert failed: {:?}", res.err().unwrap());
+
+                    let mut search_args = VectorSearchArgs {
+                        query: vec![0.1, 0.2, 0.3],
+                        k: 2,
+                        filter_inputs: None,
+                        hnsw_params: None,
+                    };
                     if $index_type == IndexType::Hnsw {
-                        query = query.with(&HnswSearchOption {
+                        search_args.hnsw_params = Some(HnswSearchOption {
                             ef_search: 10,
                         });
                     }
-                    let result = db.query(&query, 1);
+                    let result = db.query(search_args);
                     assert!(result.is_ok());
-                    assert_eq!(result.unwrap().len(), 1);
+                    let docs_result = result.unwrap();
+                    assert_eq!(docs_result.len(), 2);
+                    assert_eq!(doc1.get("key"), docs_result[0].get("key"))
                 }
 
                 #[test]
@@ -217,16 +362,26 @@ mod tests {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
-                    let data_array = array![[0.1, 0.2, 0.3, 0.4], [0.4, 0.5, 0.6, 0.7]];
-                    let labels = vec![1, 2];
-                    let insert_data = InsertParams::new(&data_array, &labels);
-                    let result = db.upsert(1, &insert_data, None);
+                    let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3, 0.4], [0.4, 0.5, 0.6, 0.7]]);
+                    let result = db.upsert(VectorInsertArgs{
+                        flat_data: data_array.iter().map(|x| *x).collect(),
+                        data_row: 2,
+                        data_dim: 4,
+                        docs: vec![None, None],
+                        attributes: vec![],
+                        hnsw_params: None,
+                    });
                     assert!(result.is_err());
 
-                    let data_array = array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
-                    let labels = vec![1, 2, 3];
-                    let insert_data = InsertParams::new(&data_array, &labels);
-                    let result = db.upsert(2, &insert_data, None);
+                    let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
+                    let result = db.upsert(VectorInsertArgs{
+                        flat_data: data_array.iter().map(|x| *x).collect(),
+                        data_row: 3,
+                        data_dim: 3,
+                        docs: vec![None, None, None],
+                        attributes: vec![],
+                        hnsw_params: None,
+                    });
                     assert!(result.is_err());
                 }
 
@@ -235,13 +390,18 @@ mod tests {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
-                    let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
+                    let mut search_args = VectorSearchArgs {
+                        query: vec![0.1, 0.2, 0.3],
+                        k: 1,
+                        filter_inputs: None,
+                        hnsw_params: None,
+                    };
                     if $index_type == IndexType::Hnsw {
-                        query = query.with(&HnswSearchOption {
+                        search_args.hnsw_params = Some(HnswSearchOption {
                             ef_search: 10,
                         });
                     }
-                    let result = db.query(&query, 1);
+                    let result = db.query(search_args);
                     assert!(result.is_ok());
                     assert!(result.unwrap().is_empty());
                 }
@@ -251,15 +411,66 @@ mod tests {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
-                    let mut query = SearchQuery::new(vec![0.1, 0.2, 0.3]);
+                    let doc1 = HashMap::from([(
+                        "key".to_string(),
+                        Value::String("value1".to_string()),
+                    )]);
+
+                    let doc2 = HashMap::from([(
+                        "key".to_string(),
+                        Value::String("value2".to_string()),
+                    )]);
+
+                    let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
+                    let res = db.upsert(VectorInsertArgs{
+                        flat_data: data_array.iter().map(|x| *x).collect(),
+                        data_row: 2,
+                        data_dim: 3,
+                        docs: vec![Some(doc1.clone()), Some(doc2.clone())],
+                        attributes: vec![
+                            Some(HashMap::from([("age".to_string(), Value::Number(10.into()))])),
+                            Some(HashMap::from([("age".to_string(), Value::Number(20.into()))])),
+                        ],
+                        hnsw_params: None,
+                    });
+                    assert!(res.is_ok(), "upsert failed: {:?}", res.err().unwrap());
+
+                    let mut search_args = VectorSearchArgs {
+                        query: vec![0.1, 0.2, 0.3],
+                        k: 2,
+                        filter_inputs: Some(vec![IntFilterInput {
+                            field: "age".to_string(),
+                            op: FilterOp::Equal,
+                            target: 20,
+                        }]),
+                        hnsw_params: None,
+                    };
+
                     if $index_type == IndexType::Hnsw {
-                        query = query.with(&HnswSearchOption {
+                        search_args.hnsw_params = Some(HnswSearchOption {
                             ef_search: 10,
                         });
                     }
-                    let result = db.query(&query, 1);
+
+                    // without filter, the first doc should be returned
+                    // filter the first doc, then only the second doc should be returned
+                    let result = db.query(search_args.clone());
                     assert!(result.is_ok());
-                    assert!(result.unwrap().is_empty());
+                    let docs_result = result.unwrap();
+                    assert_eq!(docs_result.len(), 1);
+                    assert_eq!(doc2.get("key"), docs_result[0].get("key"));
+
+                    // test with not equal filter
+                    search_args.filter_inputs = Some(vec![IntFilterInput {
+                        field: "age".to_string(),
+                        op: FilterOp::NotEqual,
+                        target: 20,
+                    }]);
+                    let result = db.query(search_args);
+                    assert!(result.is_ok());
+                    let docs_result = result.unwrap();
+                    assert_eq!(docs_result.len(), 1);
+                    assert_eq!(doc1.get("key"), docs_result[0].get("key"));
                 }
             }
         )*
