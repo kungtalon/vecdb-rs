@@ -19,8 +19,8 @@ pub type DocMap = HashMap<String, Value>;
 
 pub struct VectorDatabase {
     db_path: PathBuf,
-    scalar_storage: Box<dyn ScalarStorage>,
-    vector_index: Box<dyn Index>,
+    scalar_storage: Box<dyn ScalarStorage + Send + Sync>,
+    vector_index: Box<dyn Index + Send + Sync>,
     filter_index: IntFilterIndex,
 }
 
@@ -60,7 +60,7 @@ impl VectorDatabase {
     ) -> Result<Self, DBError> {
         let db_path = PathBuf::new().join(db_path);
         let scalar_storage = new_scalar_storage(&db_path, concurrent)?;
-        let vector_index: Box<dyn Index> = match index_params.index_type {
+        let vector_index: Box<dyn Index + Send + Sync> = match index_params.index_type {
             IndexType::Flat => {
                 // Create a flat index
                 Box::new(

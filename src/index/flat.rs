@@ -3,14 +3,18 @@ use crate::merror::IndexError;
 use faiss::Index as FIndex;
 use faiss::{index_factory, IdMap};
 use std::cmp::min;
+use std::sync::{Arc, Mutex};
 
 use crate::index::option::{InsertParams, SearchQuery};
 
 const FLAT_INDEX_OPTION: &str = "Flat";
 
 pub struct FlatIndex {
-    index: Box<dyn FIndex>,
+    index: Arc<Mutex<dyn FIndex>>,
 }
+
+unsafe impl Send for FlatIndex {}
+unsafe impl Sync for FlatIndex {}
 
 impl FlatIndex {
     pub fn new(dim: u32, metric_type: MetricType) -> Result<Self, IndexError> {
@@ -22,13 +26,18 @@ impl FlatIndex {
             IdMap::new(index).map_err(|e| IndexError::InitializationError(e.to_string()))?;
 
         Ok(Self {
-            index: Box::new(id_map_index),
+            index: Arc::new(Mutex::new(id_map_index)),
         })
     }
 }
 
 impl Index for FlatIndex {
     fn insert(&mut self, params: &InsertParams) -> Result<(), IndexError> {
+        let mut index_guard = self
+            .index
+            .lock()
+            .map_err(|e| IndexError::UnexpectedError(format!("Failed to lock index: {}", e)))?;
+
         if params.data.nrows() != params.labels.len() {
             return Err(IndexError::InsertionError(format!(
                 "data rows {} and labels {} do not match",
@@ -37,11 +46,11 @@ impl Index for FlatIndex {
             )));
         }
 
-        if params.data.ncols() != self.index.d() as usize {
+        if params.data.ncols() != index_guard.d() as usize {
             return Err(IndexError::InsertionError(format!(
                 "data dimension {} does not match index dimension {}",
                 params.data.ncols(),
-                self.index.d()
+                index_guard.d()
             )));
         }
 
@@ -54,7 +63,7 @@ impl Index for FlatIndex {
 
         match data_slice_opt {
             Some(data_slice) => {
-                self.index
+                index_guard
                     .add_with_ids(data_slice, ids.as_slice())
                     .map_err(|e| IndexError::InsertionError(e.to_string()))?;
                 Ok(())
@@ -67,9 +76,14 @@ impl Index for FlatIndex {
     }
 
     fn search(&mut self, query: &SearchQuery, k: usize) -> Result<SearchResult, IndexError> {
+        let mut index_guard = self
+            .index
+            .lock()
+            .map_err(|e| IndexError::UnexpectedError(format!("Failed to lock index: {}", e)))?;
+
         // if k is bigger than ntotal, set k to ntotal
         // othewise faiss will return undefined data
-        let target_k = min(k, self.index.ntotal() as usize);
+        let target_k = min(k, index_guard.ntotal() as usize);
         if target_k == 0 {
             return Ok(SearchResult {
                 distances: vec![],
@@ -79,8 +93,7 @@ impl Index for FlatIndex {
 
         let search_res: SearchResult;
         if let Some(filter) = &query.id_filter {
-            search_res = self
-                .index
+            search_res = index_guard
                 .search_with_params(query.vector.as_slice(), target_k, &filter.as_selector())
                 .map(SearchResult::from)
                 .map_err(|e| IndexError::UnexpectedError(e.to_string()))?;
@@ -88,8 +101,7 @@ impl Index for FlatIndex {
             return Ok(search_res);
         }
 
-        search_res = self
-            .index
+        search_res = index_guard
             .search(query.vector.as_slice(), target_k)
             .map(SearchResult::from)
             .map_err(|e| IndexError::UnexpectedError(e.to_string()))?;
@@ -102,9 +114,8 @@ impl Index for FlatIndex {
 mod tests {
     use super::*;
     use crate::filter::IdFilter;
-    use crate::index::option::{InsertParams, SearchOption};
+    use crate::index::option::InsertParams;
     use ndarray::Array2 as NMatrix;
-    use ndarray_rand::{rand_distr::Uniform, RandomExt};
 
     fn setup(nrow: u32, dim: u32, metric_type: MetricType) -> (FlatIndex, NMatrix<f32>, Vec<u64>) {
         let index = FlatIndex::new(dim, metric_type).expect("Failed to initialize index");
@@ -133,7 +144,7 @@ mod tests {
         let insert_result = index.insert(&InsertParams::new(&data, &labels));
 
         assert!(insert_result.is_ok());
-        assert!(index.index.ntotal() == 2);
+        assert!(index.index.lock().unwrap().ntotal() == 2);
     }
 
     #[test]

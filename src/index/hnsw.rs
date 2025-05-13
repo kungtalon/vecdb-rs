@@ -35,7 +35,7 @@ fn read_hnsw_config_from_env(name: &str, default: u32) -> u32 {
     }
 }
 
-pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> {
+pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> + Send + Sync {
     fn get_nb_point(&self) -> usize;
 
     fn search_filter(
@@ -70,6 +70,9 @@ pub struct HnswIndex {
     index: Box<dyn HnswIndexTrait>,
     dim: u32,
 }
+
+unsafe impl Send for HnswIndex {}
+unsafe impl Sync for HnswIndex {}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HnswIndexOption {
