@@ -6,18 +6,20 @@ use std::vec;
 
 use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
+use std::marker::Sync;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::filter::{FilterOp, IdFilter, IntFilterIndex, IntFilterInput};
 use crate::index::*;
 use crate::merror::DBError;
-use crate::scalar::{new_scalar_storage, ScalarStorage};
+use crate::scalar::{new_concurrent_scalar_storage, ScalarStorage};
 
 pub type DocMap = HashMap<String, Value>;
 
 pub struct VectorDatabase {
     db_path: PathBuf,
-    scalar_storage: Box<dyn ScalarStorage>,
+    scalar_storage: Arc<Mutex<dyn ScalarStorage>>,
     vector_index: Box<dyn Index>,
     filter_index: IntFilterIndex,
 }
@@ -57,7 +59,7 @@ impl VectorDatabase {
         concurrent: bool,
     ) -> Result<Self, DBError> {
         let db_path = PathBuf::new().join(db_path);
-        let scalar_storage = new_scalar_storage(&db_path, concurrent)?;
+        let scalar_storage = new_concurrent_scalar_storage(&db_path, concurrent)?;
         let vector_index: Box<dyn Index> = match index_params.index_type {
             IndexType::Flat => {
                 // Create a flat index
@@ -90,7 +92,7 @@ impl VectorDatabase {
         })
     }
 
-    fn upsert(&mut self, args: VectorInsertArgs) -> Result<(), DBError> {
+    pub async fn upsert(&mut self, args: VectorInsertArgs) -> Result<(), DBError> {
         let (mismatch_field, mismatch_value, expect_value) = args.validate();
 
         if !mismatch_field.is_empty() {
@@ -105,7 +107,15 @@ impl VectorDatabase {
                 DBError::PutError(format!("unable to create array from flat data: {}", e))
             })?;
 
-        let ids = self.scalar_storage.gen_incr_ids(args.data_row)?;
+        let ids: Vec<u64>;
+        {
+            let mut scalar_storage_guard = self
+                .scalar_storage
+                .lock()
+                .map_err(|e| DBError::PutError(format!("unable to lock scalar storage: {}", e)))?;
+
+            ids = scalar_storage_guard.gen_incr_ids(args.data_row)?;
+        }
 
         let mut index_insert_params = InsertParams::new(&insert_data, &ids);
         if args.hnsw_params.is_some() {
@@ -121,32 +131,41 @@ impl VectorDatabase {
                 Some(m) => m.clone().to_owned(),
                 None => HashMap::new(),
             };
-            self.insert_doc(&mut doc_map, ids[i])?;
+            self.insert_doc(&mut doc_map, ids[i]).await?;
         }
 
         for (i, attr) in args.attributes.iter().enumerate() {
             if let Some(attr_map) = attr {
-                self.insert_attribute(attr_map, ids[i])?;
+                self.insert_attribute(attr_map, ids[i]).await?;
             }
         }
 
         Ok(())
     }
 
-    fn insert_doc(&mut self, doc: &mut DocMap, id: u64) -> Result<(), DBError> {
+    async fn insert_doc(&mut self, doc: &mut DocMap, id: u64) -> Result<(), DBError> {
         doc.insert("id".to_string(), Value::Number(id.into()));
 
         let doc_bytes = serde_json::to_vec(&doc)
             .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
 
-        self.scalar_storage
+        let mut scalar_storage_guard = self
+            .scalar_storage
+            .lock()
+            .map_err(|e| DBError::PutError(format!("unable to lock scalar storage: {}", e)))?;
+
+        scalar_storage_guard
             .put(id, &doc_bytes)
             .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
 
         Ok(())
     }
 
-    fn insert_attribute(&mut self, attr: &HashMap<String, Value>, id: u64) -> Result<(), DBError> {
+    async fn insert_attribute(
+        &mut self,
+        attr: &HashMap<String, Value>,
+        id: u64,
+    ) -> Result<(), DBError> {
         for (key, value) in attr {
             match value {
                 Value::Number(num) => {
@@ -166,7 +185,7 @@ impl VectorDatabase {
         Ok(())
     }
 
-    pub fn query(
+    pub async fn query(
         &mut self,
         search_args: VectorSearchArgs, // should not use SearchQuery here
     ) -> Result<Vec<DocMap>, DBError> {
@@ -193,7 +212,12 @@ impl VectorDatabase {
             return Ok(vec![]);
         }
 
-        let documents = self.scalar_storage.multi_get_value(&search_result.labels)?;
+        let scalar_storage_guard = self
+            .scalar_storage
+            .lock()
+            .map_err(|e| DBError::GetError(format!("unable to lock scalar storage: {}", e)))?;
+
+        let documents = scalar_storage_guard.multi_get_value(&search_result.labels)?;
 
         Ok(documents)
     }
@@ -290,8 +314,8 @@ mod tests {
                     assert!(result.is_ok());
                 }
 
-                #[test]
-                fn test_vector_database_upsert() {
+                #[tokio::test]
+                async fn test_vector_database_upsert() {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
@@ -308,12 +332,13 @@ mod tests {
                         docs: vec![Some(doc.clone()), Some(doc.clone())],
                         attributes: vec![],
                         hnsw_params: None,
-                    });
+                    }).await;
+
                     assert!(result.is_ok());
                 }
 
-                #[test]
-                fn test_vector_database_query() {
+                #[tokio::test]
+                async fn test_vector_database_query() {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
@@ -335,7 +360,7 @@ mod tests {
                         docs: vec![Some(doc1.clone()), Some(doc2)],
                         attributes: vec![],
                         hnsw_params: None,
-                    });
+                    }).await;
 
                     assert!(res.is_ok(), "upsert failed: {:?}", res.err().unwrap());
 
@@ -350,15 +375,16 @@ mod tests {
                             ef_search: 10,
                         });
                     }
-                    let result = db.query(search_args);
+                    let result = db.query(search_args).await;
+
                     assert!(result.is_ok());
                     let docs_result = result.unwrap();
                     assert_eq!(docs_result.len(), 2);
                     assert_eq!(doc1.get("key"), docs_result[0].get("key"))
                 }
 
-                #[test]
-                fn test_vector_database_upsert_with_wrong_dim() {
+                #[tokio::test]
+                async fn test_vector_database_upsert_with_wrong_dim() {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
@@ -370,7 +396,8 @@ mod tests {
                         docs: vec![None, None],
                         attributes: vec![],
                         hnsw_params: None,
-                    });
+                    }).await;
+
                     assert!(result.is_err());
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
@@ -381,12 +408,13 @@ mod tests {
                         docs: vec![None, None, None],
                         attributes: vec![],
                         hnsw_params: None,
-                    });
+                    }).await;
+
                     assert!(result.is_err());
                 }
 
-                #[test]
-                fn test_vector_database_query_with_no_results() {
+                #[tokio::test]
+                async fn test_vector_database_query_with_no_results() {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
@@ -401,13 +429,14 @@ mod tests {
                             ef_search: 10,
                         });
                     }
-                    let result = db.query(search_args);
+                    let result = db.query(search_args).await;
+
                     assert!(result.is_ok());
                     assert!(result.unwrap().is_empty());
                 }
 
-                #[test]
-                fn test_vector_database_query_with_filter() {
+                #[tokio::test]
+                async fn test_vector_database_query_with_filter() {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
 
@@ -432,7 +461,8 @@ mod tests {
                             Some(HashMap::from([("age".to_string(), Value::Number(20.into()))])),
                         ],
                         hnsw_params: None,
-                    });
+                    }).await;
+
                     assert!(res.is_ok(), "upsert failed: {:?}", res.err().unwrap());
 
                     let mut search_args = VectorSearchArgs {
@@ -454,7 +484,8 @@ mod tests {
 
                     // without filter, the first doc should be returned
                     // filter the first doc, then only the second doc should be returned
-                    let result = db.query(search_args.clone());
+                    let result = db.query(search_args.clone()).await;
+
                     assert!(result.is_ok());
                     let docs_result = result.unwrap();
                     assert_eq!(docs_result.len(), 1);
@@ -466,7 +497,8 @@ mod tests {
                         op: FilterOp::NotEqual,
                         target: 20,
                     }]);
-                    let result = db.query(search_args);
+                    let result = db.query(search_args).await;
+
                     assert!(result.is_ok());
                     let docs_result = result.unwrap();
                     assert_eq!(docs_result.len(), 1);
