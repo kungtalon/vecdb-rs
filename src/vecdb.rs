@@ -13,13 +13,13 @@ use uuid::Uuid;
 use crate::filter::{FilterOp, IdFilter, IntFilterIndex, IntFilterInput};
 use crate::index::*;
 use crate::merror::DBError;
-use crate::scalar::{new_concurrent_scalar_storage, ScalarStorage};
+use crate::scalar::{new_scalar_storage, ScalarStorage};
 
 pub type DocMap = HashMap<String, Value>;
 
 pub struct VectorDatabase {
     db_path: PathBuf,
-    scalar_storage: Arc<Mutex<dyn ScalarStorage>>,
+    scalar_storage: Box<dyn ScalarStorage>,
     vector_index: Box<dyn Index>,
     filter_index: IntFilterIndex,
 }
@@ -59,7 +59,7 @@ impl VectorDatabase {
         concurrent: bool,
     ) -> Result<Self, DBError> {
         let db_path = PathBuf::new().join(db_path);
-        let scalar_storage = new_concurrent_scalar_storage(&db_path, concurrent)?;
+        let scalar_storage = new_scalar_storage(&db_path, concurrent)?;
         let vector_index: Box<dyn Index> = match index_params.index_type {
             IndexType::Flat => {
                 // Create a flat index
@@ -107,15 +107,7 @@ impl VectorDatabase {
                 DBError::PutError(format!("unable to create array from flat data: {}", e))
             })?;
 
-        let ids: Vec<u64>;
-        {
-            let mut scalar_storage_guard = self
-                .scalar_storage
-                .lock()
-                .map_err(|e| DBError::PutError(format!("unable to lock scalar storage: {}", e)))?;
-
-            ids = scalar_storage_guard.gen_incr_ids(args.data_row)?;
-        }
+        let ids = self.scalar_storage.gen_incr_ids(args.data_row)?;
 
         let mut index_insert_params = InsertParams::new(&insert_data, &ids);
         if args.hnsw_params.is_some() {
@@ -149,12 +141,7 @@ impl VectorDatabase {
         let doc_bytes = serde_json::to_vec(&doc)
             .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
 
-        let mut scalar_storage_guard = self
-            .scalar_storage
-            .lock()
-            .map_err(|e| DBError::PutError(format!("unable to lock scalar storage: {}", e)))?;
-
-        scalar_storage_guard
+        self.scalar_storage
             .put(id, &doc_bytes)
             .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
 
@@ -212,12 +199,7 @@ impl VectorDatabase {
             return Ok(vec![]);
         }
 
-        let scalar_storage_guard = self
-            .scalar_storage
-            .lock()
-            .map_err(|e| DBError::GetError(format!("unable to lock scalar storage: {}", e)))?;
-
-        let documents = scalar_storage_guard.multi_get_value(&search_result.labels)?;
+        let documents = self.scalar_storage.multi_get_value(&search_result.labels)?;
 
         Ok(documents)
     }

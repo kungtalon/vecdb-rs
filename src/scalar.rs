@@ -10,7 +10,7 @@ type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
 const KEY_ID_MAX: &str = "__id_max__";
 
-pub trait ScalarStorage: Sync {
+pub trait ScalarStorage: Sync + Send {
     fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError>;
 
     fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError>;
@@ -44,20 +44,6 @@ pub fn new_scalar_storage<P: AsRef<Path>>(
     let db = SingleThreadRocksDB::new(&path)?;
 
     Ok(Box::new(db))
-}
-
-pub fn new_concurrent_scalar_storage<P: AsRef<Path>>(
-    path: P,
-    concurrent: bool,
-) -> Result<Arc<Mutex<dyn ScalarStorage>>, DBError> {
-    if concurrent {
-        let db = MultiThreadRocksDB::new(&path)?;
-        return Ok(Arc::new(Mutex::new(db)));
-    }
-
-    let db = SingleThreadRocksDB::new(&path)?;
-
-    Ok(Arc::new(Mutex::new(db)))
 }
 
 struct SingleThreadRocksDB {
@@ -127,7 +113,8 @@ impl ScalarStorage for SingleThreadRocksDB {
 }
 
 struct MultiThreadRocksDB {
-    db: std::sync::Mutex<Mdb>,
+    mutex: Mutex<()>,
+    db: Mdb,
 }
 
 unsafe impl Send for MultiThreadRocksDB {}
@@ -140,34 +127,26 @@ impl MultiThreadRocksDB {
         options.create_if_missing(true);
         let db = Mdb::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
         Ok(MultiThreadRocksDB {
-            db: std::sync::Mutex::new(db),
+            mutex: Mutex::new(()),
+            db,
         })
     }
 }
 
 impl ScalarStorage for MultiThreadRocksDB {
     fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError> {
-        let db_guard = self
-            .db
-            .lock()
-            .map_err(|e| DBError::GetError(format!("failed to lock mutex: {:?}", e)))?;
-
         let key = index.to_be_bytes();
 
-        db_guard
+        self.db
             .put(key, values)
             .map_err(|e| DBError::PutError(e.to_string()))?;
         Ok(())
     }
 
     fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError> {
-        let db_guard = self
-            .db
-            .lock()
-            .map_err(|e| DBError::GetError(format!("failed to lock mutex: {:?}", e)))?;
-
         let key = index.to_be_bytes();
-        match db_guard
+        match self
+            .db
             .get(key)
             .map_err(|e| DBError::GetError(e.to_string()))?
         {
@@ -177,16 +156,11 @@ impl ScalarStorage for MultiThreadRocksDB {
     }
 
     fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError> {
-        let db_guard = self
-            .db
-            .lock()
-            .map_err(|e| DBError::GetError(format!("failed to lock mutex: {:?}", e)))?;
-
         let mut result: Vec<HashMap<String, Value>> = Vec::new();
 
         let keys_byte = indices.iter().map(|i| i.to_be_bytes());
 
-        let scalar_response = db_guard.multi_get(keys_byte);
+        let scalar_response = self.db.multi_get(keys_byte);
 
         for scalar in scalar_response {
             match scalar {
@@ -205,12 +179,12 @@ impl ScalarStorage for MultiThreadRocksDB {
     }
 
     fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError> {
-        let mut db_guard = self
-            .db
+        let _guard = self
+            .mutex
             .lock()
-            .map_err(|e| DBError::GetError(format!("failed to lock mutex: {:?}", e)))?;
+            .map_err(|e| DBError::GetError(format!("failed to acquire lock: {:?}", e)))?;
 
-        gen_incr_ids(&mut db_guard, num)
+        gen_incr_ids(&mut self.db, num)
     }
 }
 
