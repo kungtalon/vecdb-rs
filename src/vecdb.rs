@@ -24,6 +24,8 @@ pub struct VectorDatabase {
     filter_index: IntFilterIndex,
 }
 
+unsafe impl Sync for VectorDatabase {}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct IndexParams {
     dim: u32,
