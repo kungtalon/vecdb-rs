@@ -3,11 +3,12 @@ use ndarray::{array, Array};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::vec;
+use tokio::task;
 
 use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
 use std::marker::Sync;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::filter::{FilterOp, IdFilter, IntFilterIndex, IntFilterInput};
@@ -18,20 +19,27 @@ use crate::scalar::{new_scalar_storage, ScalarStorage};
 pub type DocMap = HashMap<String, Value>;
 
 pub struct VectorDatabase {
-    db_path: PathBuf,
-    scalar_storage: Box<dyn ScalarStorage + Send + Sync>,
-    vector_index: Box<dyn Index + Send + Sync>,
-    filter_index: IntFilterIndex,
+    scalar_storage: Arc<RwLock<dyn ScalarStorage>>,
+    vector_index: Arc<Mutex<dyn Index + Send>>,
+    filter_index: Arc<RwLock<IntFilterIndex>>,
 }
 
-unsafe impl Sync for VectorDatabase {}
+impl Clone for VectorDatabase {
+    fn clone(&self) -> Self {
+        Self {
+            scalar_storage: Arc::clone(&self.scalar_storage),
+            vector_index: Arc::clone(&self.vector_index),
+            filter_index: Arc::clone(&self.filter_index),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct IndexParams {
-    dim: u32,
-    metric_type: MetricType,
-    index_type: IndexType,
-    hnsw_params: Option<HnswIndexOption>,
+    pub dim: u32,
+    pub metric_type: MetricType,
+    pub index_type: IndexType,
+    pub hnsw_params: Option<HnswIndexOption>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -55,25 +63,21 @@ pub struct VectorSearchArgs {
 }
 
 impl VectorDatabase {
-    pub fn new<D: AsRef<Path>>(
-        db_path: D,
-        index_params: IndexParams,
-        concurrent: bool,
-    ) -> Result<Self, DBError> {
+    pub fn new<D: AsRef<Path>>(db_path: D, index_params: IndexParams) -> Result<Self, DBError> {
         let db_path = PathBuf::new().join(db_path);
-        let scalar_storage = new_scalar_storage(&db_path, concurrent)?;
-        let vector_index: Box<dyn Index + Send + Sync> = match index_params.index_type {
+        let scalar_storage = Arc::new(RwLock::new(new_scalar_storage(db_path)?));
+        let vector_index: Arc<Mutex<dyn Index + Send>> = match index_params.index_type {
             IndexType::Flat => {
                 // Create a flat index
-                Box::new(
+                Arc::new(Mutex::new(
                     FlatIndex::new(index_params.dim, index_params.metric_type).map_err(|e| {
                         DBError::CreateError(format!("unable to create vector index: {}", e))
                     })?,
-                )
+                ))
             }
             IndexType::Hnsw => {
                 // Create an HNSW index
-                Box::new(
+                Arc::new(Mutex::new(
                     HnswIndex::new(
                         index_params.dim,
                         index_params.metric_type,
@@ -82,15 +86,14 @@ impl VectorDatabase {
                     .map_err(|e| {
                         DBError::CreateError(format!("unable to create vector index: {}", e))
                     })?,
-                )
+                ))
             }
         };
 
         Ok(Self {
-            db_path,
             scalar_storage,
             vector_index,
-            filter_index: IntFilterIndex::new(),
+            filter_index: Arc::new(RwLock::new(IntFilterIndex::new())),
         })
     }
 
@@ -109,16 +112,25 @@ impl VectorDatabase {
                 DBError::PutError(format!("unable to create array from flat data: {}", e))
             })?;
 
-        let ids = self.scalar_storage.gen_incr_ids(args.data_row)?;
+        let ids: Vec<u64>;
+        {
+            let mut scalar_storage_writer = self.scalar_storage.write().unwrap();
+
+            ids = scalar_storage_writer.gen_incr_ids(args.data_row)?;
+        }
 
         let mut index_insert_params = InsertParams::new(&insert_data, &ids);
         if args.hnsw_params.is_some() {
             index_insert_params = index_insert_params.with(args.hnsw_params.unwrap());
         }
 
-        self.vector_index
-            .insert(&index_insert_params)
-            .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))?;
+        task::block_in_place(|| {
+            self.vector_index
+                .lock()
+                .unwrap()
+                .insert(&index_insert_params)
+                .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))
+        })?;
 
         for (i, doc) in args.docs.iter().enumerate() {
             let mut doc_map = match doc {
@@ -143,9 +155,14 @@ impl VectorDatabase {
         let doc_bytes = serde_json::to_vec(&doc)
             .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
 
-        self.scalar_storage
-            .put(id, &doc_bytes)
-            .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
+        task::block_in_place(|| {
+            self.scalar_storage
+                .write()
+                .unwrap()
+                .put(id, &doc_bytes)
+                .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -159,7 +176,7 @@ impl VectorDatabase {
             match value {
                 Value::Number(num) => {
                     if let Some(num) = num.as_i64() {
-                        self.filter_index.upsert(&key, num, id);
+                        self.filter_index.write().unwrap().upsert(key, num, id);
                     }
                 }
                 _ => {
@@ -174,10 +191,7 @@ impl VectorDatabase {
         Ok(())
     }
 
-    pub async fn query(
-        &mut self,
-        search_args: VectorSearchArgs, // should not use SearchQuery here
-    ) -> Result<Vec<DocMap>, DBError> {
+    pub async fn query(&mut self, search_args: VectorSearchArgs) -> Result<Vec<DocMap>, DBError> {
         let mut query = SearchQuery::new(&search_args.query);
         if search_args.hnsw_params.is_some() {
             query = query.with(search_args.hnsw_params.as_ref().unwrap());
@@ -185,13 +199,15 @@ impl VectorDatabase {
         if search_args.filter_inputs.is_some() {
             let mut bitmap = roaring::RoaringBitmap::new();
             for filter in search_args.filter_inputs.unwrap() {
-                bitmap = self.filter_index.apply(&filter, &bitmap);
+                bitmap = self.filter_index.read().unwrap().apply(&filter, &bitmap);
             }
             query = query.with(&IdFilter::from(bitmap));
         }
 
         let search_result = self
             .vector_index
+            .lock()
+            .unwrap()
             .search(&query, search_args.k)
             .map_err(|e| DBError::GetError(format!("unable to query vector data: {}", e)))?;
 
@@ -201,7 +217,11 @@ impl VectorDatabase {
             return Ok(vec![]);
         }
 
-        let documents = self.scalar_storage.multi_get_value(&search_result.labels)?;
+        let documents = self
+            .scalar_storage
+            .read()
+            .unwrap()
+            .multi_get_value(&search_result.labels)?;
 
         Ok(documents)
     }
@@ -294,14 +314,14 @@ mod tests {
                 fn test_vector_database_new() {
                     let index_params = create_test_index_params($metric_type, $index_type);
 
-                    let result = VectorDatabase::new(TestPath::new(), index_params, false);
+                    let result = VectorDatabase::new(TestPath::new(), index_params);
                     assert!(result.is_ok());
                 }
 
                 #[tokio::test]
                 async fn test_vector_database_upsert() {
                     let index_params = create_test_index_params($metric_type, $index_type);
-                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
                     let doc = HashMap::from([(
@@ -324,7 +344,7 @@ mod tests {
                 #[tokio::test]
                 async fn test_vector_database_query() {
                     let index_params = create_test_index_params($metric_type, $index_type);
-                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
                     let doc1 = HashMap::from([(
                         "key".to_string(),
@@ -370,7 +390,7 @@ mod tests {
                 #[tokio::test]
                 async fn test_vector_database_upsert_with_wrong_dim() {
                     let index_params = create_test_index_params($metric_type, $index_type);
-                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3, 0.4], [0.4, 0.5, 0.6, 0.7]]);
                     let result = db.upsert(VectorInsertArgs{
@@ -400,7 +420,7 @@ mod tests {
                 #[tokio::test]
                 async fn test_vector_database_query_with_no_results() {
                     let index_params = create_test_index_params($metric_type, $index_type);
-                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
                     let mut search_args = VectorSearchArgs {
                         query: vec![0.1, 0.2, 0.3],
@@ -422,7 +442,7 @@ mod tests {
                 #[tokio::test]
                 async fn test_vector_database_query_with_filter() {
                     let index_params = create_test_index_params($metric_type, $index_type);
-                    let mut db = VectorDatabase::new(TestPath::new(), index_params, false).unwrap();
+                    let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
                     let doc1 = HashMap::from([(
                         "key".to_string(),

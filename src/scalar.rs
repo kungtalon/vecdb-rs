@@ -32,94 +32,15 @@ pub trait ScalarStorage: Sync + Send {
     fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError>;
 }
 
-pub fn new_scalar_storage<P: AsRef<Path>>(
-    path: P,
-    concurrent: bool,
-) -> Result<Box<dyn ScalarStorage>, DBError> {
-    if concurrent {
-        let db = MultiThreadRocksDB::new(&path)?;
-        return Ok(Box::new(db));
-    }
-
-    let db = SingleThreadRocksDB::new(&path)?;
-
-    Ok(Box::new(db))
-}
-
-struct SingleThreadRocksDB {
-    db: DB,
-}
-
-unsafe impl Send for SingleThreadRocksDB {}
-
-unsafe impl Sync for SingleThreadRocksDB {}
-
-impl SingleThreadRocksDB {
-    fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
-        let mut options = Options::default();
-        options.create_if_missing(true);
-        let db = DB::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
-        Ok(SingleThreadRocksDB { db })
-    }
-}
-
-impl ScalarStorage for SingleThreadRocksDB {
-    fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError> {
-        let key = index.to_be_bytes();
-        self.db
-            .put(key, values)
-            .map_err(|e| DBError::PutError(e.to_string()))?;
-        Ok(())
-    }
-
-    fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError> {
-        let key = index.to_be_bytes();
-        match self
-            .db
-            .get(key)
-            .map_err(|e| DBError::GetError(e.to_string()))?
-        {
-            Some(value) => Ok(Some(value.to_vec())),
-            None => Ok(None),
-        }
-    }
-
-    fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError> {
-        let mut result: Vec<HashMap<String, Value>> = Vec::new();
-
-        let keys_byte = indices.iter().map(|i| i.to_be_bytes());
-
-        let scalar_response = self.db.multi_get(keys_byte);
-
-        for scalar in scalar_response {
-            match scalar {
-                Ok(Some(bytes)) => {
-                    let value = serde_json::from_slice::<HashMap<String, Value>>(&bytes)
-                        .map_err(|e| DBError::GetError(e.to_string()))?;
-
-                    result.push(value);
-                }
-                Ok(None) => result.push(HashMap::new()),
-                Err(e) => return Err(DBError::GetError(e.to_string())),
-            }
-        }
-
-        Ok(result)
-    }
-
-    fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError> {
-        gen_incr_ids(&mut self.db, num)
-    }
+pub fn new_scalar_storage<P: AsRef<Path>>(path: P) -> Result<impl ScalarStorage, DBError> {
+    let db = MultiThreadRocksDB::new(&path)?;
+    return Ok(db);
 }
 
 struct MultiThreadRocksDB {
     mutex: Mutex<()>,
     db: Mdb,
 }
-
-unsafe impl Send for MultiThreadRocksDB {}
-
-unsafe impl Sync for MultiThreadRocksDB {}
 
 impl MultiThreadRocksDB {
     fn new<P: AsRef<Path>>(path: P) -> Result<Self, DBError> {
@@ -234,7 +155,7 @@ mod tests {
         db_path
     }
 
-    fn test_db_multi_get_value(db: &mut Box<dyn ScalarStorage>) {
+    fn test_db_multi_get_value(db: &mut impl ScalarStorage) {
         let key1 = 1u64;
         let msg1 = "Hello, world";
         let key2 = 2u64;
@@ -262,7 +183,7 @@ mod tests {
         assert_eq!(retrieved_value[1].get("msg").unwrap(), msg2);
     }
 
-    fn test_db_get_value(db: &mut Box<dyn ScalarStorage>) {
+    fn test_db_get_value(db: &mut impl ScalarStorage) {
         let key = 3u64;
         let value = HashMap::from([
             ("name".to_string(), Value::String("Alice".to_string())),
@@ -284,23 +205,23 @@ mod tests {
     fn test_single_thread_rocksdb() {
         let path = setup(format!("single_thread_{}", Uuid::new_v4()).as_str());
 
-        let mut db = new_scalar_storage(&path, false).unwrap();
+        let mut db = new_scalar_storage(&path).unwrap();
 
         test_db_multi_get_value(&mut db);
         test_db_get_value(&mut db);
 
-        fs::remove_dir_all(path).unwrap();
+        fs::remove_dir_all(&path).unwrap();
     }
 
     #[test]
     fn test_multi_thread_rocksdb() {
         let path = setup(format!("multi_thread_{}", Uuid::new_v4()).as_str());
 
-        let mut db = new_scalar_storage(&path, true).unwrap();
+        let mut db = new_scalar_storage(&path).unwrap();
 
         test_db_multi_get_value(&mut db);
         test_db_get_value(&mut db);
 
-        fs::remove_dir_all(path).unwrap();
+        fs::remove_dir_all(&path).unwrap();
     }
 }

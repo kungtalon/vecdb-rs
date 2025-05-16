@@ -19,22 +19,21 @@ pub struct IntFilterInput {
 }
 
 pub struct IntFilterIndex {
-    pub int_field_filters: Arc<RwLock<AttrLookupTable>>,
+    pub int_field_filters: AttrLookupTable,
 }
+
+unsafe impl Send for IntFilterIndex {}
+unsafe impl Sync for IntFilterIndex {}
 
 impl IntFilterIndex {
     pub fn new() -> Self {
         Self {
-            int_field_filters: Arc::new(RwLock::new(HashMap::new())),
+            int_field_filters: HashMap::new(),
         }
     }
 
     pub fn upsert(&mut self, field: &str, value: i64, id: u64) {
-        let mut int_field_filters_guard = self.int_field_filters.write().unwrap();
-
-        let filter_map_by_value = int_field_filters_guard
-            .entry(field.to_string())
-            .or_default();
+        let filter_map_by_value = self.int_field_filters.entry(field.to_string()).or_default();
 
         let bitmap = filter_map_by_value.entry(value).or_default();
 
@@ -42,10 +41,9 @@ impl IntFilterIndex {
     }
 
     pub fn apply(&self, input: &IntFilterInput, bitmap: &RoaringBitmap) -> RoaringBitmap {
-        let int_field_filters_guard = self.int_field_filters.read().unwrap();
-
         if input.op == FilterOp::Equal {
-            let cur_bitmap_opt = int_field_filters_guard
+            let cur_bitmap_opt = self
+                .int_field_filters
                 .get(&input.field)
                 .and_then(|map: &HashMap<i64, RoaringBitmap>| map.get(&input.target));
 
@@ -59,7 +57,7 @@ impl IntFilterIndex {
         }
 
         if input.op == FilterOp::NotEqual {
-            let value_to_bitmap = int_field_filters_guard.get(&input.field);
+            let value_to_bitmap = self.int_field_filters.get(&input.field);
 
             if value_to_bitmap.is_none() {
                 return bitmap.clone();
