@@ -1,17 +1,14 @@
-use hnsw_rs::hnsw;
-use ndarray::{array, Array};
+use ndarray::Array;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::vec;
 use tokio::task;
 
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::marker::Sync;
 use std::sync::{Arc, Mutex, RwLock};
-use uuid::Uuid;
 
-use crate::filter::{FilterOp, IdFilter, IntFilterIndex, IntFilterInput};
+use crate::filter::{IdFilter, IntFilterIndex, IntFilterInput};
 use crate::index::*;
 use crate::merror::DBError;
 use crate::scalar::{new_scalar_storage, ScalarStorage};
@@ -119,18 +116,33 @@ impl VectorDatabase {
             ids = scalar_storage_writer.gen_incr_ids(args.data_row)?;
         }
 
-        let mut index_insert_params = InsertParams::new(&insert_data, &ids);
-        if args.hnsw_params.is_some() {
-            index_insert_params = index_insert_params.with(args.hnsw_params.unwrap());
-        }
+        {
+            let vector_index_writer = Arc::clone(&self.vector_index);
+            let insert_data_clone = insert_data.clone();
+            let ids_clone = ids.clone();
 
-        task::block_in_place(|| {
-            self.vector_index
-                .lock()
-                .unwrap()
-                .insert(&index_insert_params)
-                .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))
-        })?;
+            let res_async_insert = task::spawn_blocking(move || {
+                let index_insert_params = InsertParams {
+                    data: &insert_data_clone,
+                    labels: &ids_clone,
+                    hnsw_params: args.hnsw_params,
+                };
+
+                vector_index_writer
+                    .lock()
+                    .unwrap()
+                    .insert(&index_insert_params)
+                    .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))
+            })
+            .await;
+
+            res_async_insert.map_err(|e| {
+                DBError::PutError(format!(
+                    "error while inserting vector database asynchronously: {}",
+                    e
+                ))
+            })??;
+        }
 
         for (i, doc) in args.docs.iter().enumerate() {
             let mut doc_map = match doc {
@@ -155,14 +167,22 @@ impl VectorDatabase {
         let doc_bytes = serde_json::to_vec(&doc)
             .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
 
-        task::block_in_place(|| {
-            self.scalar_storage
+        let scalar_storage = Arc::clone(&self.scalar_storage);
+        task::spawn_blocking(move || {
+            scalar_storage
                 .write()
                 .unwrap()
                 .put(id, &doc_bytes)
                 .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
             Ok(())
-        })?;
+        })
+        .await
+        .map_err(|e| {
+            DBError::PutError(format!(
+                "error while inserting scalar data asynchronously: {}",
+                e
+            ))
+        })??;
 
         Ok(())
     }
@@ -192,7 +212,7 @@ impl VectorDatabase {
     }
 
     pub async fn query(&mut self, search_args: VectorSearchArgs) -> Result<Vec<DocMap>, DBError> {
-        let mut query = SearchQuery::new(&search_args.query);
+        let mut query = SearchQuery::new(search_args.query);
         if search_args.hnsw_params.is_some() {
             query = query.with(search_args.hnsw_params.as_ref().unwrap());
         }
@@ -204,12 +224,22 @@ impl VectorDatabase {
             query = query.with(&IdFilter::from(bitmap));
         }
 
-        let search_result = self
-            .vector_index
-            .lock()
-            .unwrap()
-            .search(&query, search_args.k)
-            .map_err(|e| DBError::GetError(format!("unable to query vector data: {}", e)))?;
+        let vector_index = Arc::clone(&self.vector_index);
+
+        let search_result = task::spawn_blocking(move || {
+            vector_index
+                .lock()
+                .unwrap()
+                .search(&query, search_args.k)
+                .map_err(|e| DBError::GetError(format!("unable to query vector data: {}", e)))
+        })
+        .await
+        .map_err(|e| {
+            DBError::GetError(format!(
+                "error while querying vector database asynchronously: {}",
+                e
+            ))
+        })??;
 
         println!("search result inside: {:?}", search_result);
 
@@ -252,7 +282,10 @@ impl VectorInsertArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::FilterOp;
+    use ndarray::array;
     use std::fs;
+    use uuid::Uuid;
 
     fn create_test_index_params(metric_type: MetricType, index_type: IndexType) -> IndexParams {
         IndexParams {

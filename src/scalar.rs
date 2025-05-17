@@ -1,10 +1,10 @@
-use std::{collections::HashMap, ops::Mul};
+use std::collections::HashMap;
 
 use crate::merror::DBError;
-use rocksdb::{Options, DB};
+use rocksdb::Options;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
@@ -13,8 +13,10 @@ const KEY_ID_MAX: &str = "__id_max__";
 pub trait ScalarStorage: Sync + Send {
     fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError>;
 
+    #[allow(unused)]
     fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError>;
 
+    #[allow(unused)]
     fn get_value(&self, index: u64) -> Result<Option<HashMap<String, Value>>, DBError> {
         match self.get(index)? {
             Some(bytes) => {
@@ -34,7 +36,7 @@ pub trait ScalarStorage: Sync + Send {
 
 pub fn new_scalar_storage<P: AsRef<Path>>(path: P) -> Result<impl ScalarStorage, DBError> {
     let db = MultiThreadRocksDB::new(&path)?;
-    return Ok(db);
+    Ok(db)
 }
 
 struct MultiThreadRocksDB {

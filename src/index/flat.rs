@@ -155,7 +155,7 @@ mod tests {
 
         let query = vec![1.1, 2.1, 2.9, 3.9];
         let k: usize = 2;
-        let result = index.search(&SearchQuery::new(&query), k);
+        let result = index.search(&SearchQuery::new(query.clone()), k);
 
         assert!(result.is_ok());
         let search_result = result.unwrap();
@@ -176,7 +176,7 @@ mod tests {
 
         let query = vec![1.1, 2.1, 2.9, 3.9, 5.0];
         let k: usize = 3;
-        let original_result = index.search(&SearchQuery::new(&query), k);
+        let original_result = index.search(&SearchQuery::new(query.clone()), k);
         assert!(
             original_result.is_ok(),
             "error from search {:?}",
@@ -186,7 +186,7 @@ mod tests {
 
         let mut filter = IdFilter::new();
         filter.add_all(&labels[1..]);
-        let result = index.search(&SearchQuery::new(&query).with(&filter), k);
+        let result = index.search(&SearchQuery::new(query).with(&filter), k);
 
         assert!(result.is_ok(), "error from search {:?}", result.err());
         let search_result = result.unwrap();

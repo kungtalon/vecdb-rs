@@ -1,7 +1,6 @@
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
 
 type AttrLookupTable = HashMap<String, HashMap<i64, RoaringBitmap>>;
 
@@ -76,6 +75,6 @@ impl IntFilterIndex {
             return res_bitmap;
         }
 
-        return bitmap.clone();
+        bitmap.clone()
     }
 }

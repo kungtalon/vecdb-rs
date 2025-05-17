@@ -2,7 +2,6 @@ mod filter;
 mod index;
 mod merror;
 mod scalar;
-mod util;
 mod vecdb;
 
 use axum::{
@@ -63,16 +62,16 @@ async fn handle_vector_upsert(
             let response = VectorUpsertResponse {
                 message: "Upsert successful".to_string(),
             };
-            return (StatusCode::OK, Json(response));
+            (StatusCode::OK, Json(response))
         }
         Err(e) => {
             event!(Level::ERROR, "Error during vector upsert: {}", e);
-            return (
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(VectorUpsertResponse {
                     message: format!("Error during vector upsert: {}", e),
                 }),
-            );
+            )
         }
     }
 }

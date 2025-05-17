@@ -1,12 +1,9 @@
-use core::alloc;
-
 use crate::filter::IdFilter;
 use crate::index::option::{InsertParams, SearchQuery};
 use crate::index::{Index, MetricType, SearchResult};
 use crate::merror::IndexError;
 use anndists::dist::{distances, Distance};
-use hnsw_rs::api::{self as hnsw_api, AnnT};
-use hnsw_rs::filter::FilterT;
+use hnsw_rs::api::{self as hnsw_api};
 use hnsw_rs::hnsw;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -36,6 +33,7 @@ fn read_hnsw_config_from_env(name: &str, default: u32) -> u32 {
 }
 
 pub trait HnswIndexTrait: hnsw_api::AnnT<Val = FT> + Send + Sync {
+    #[allow(unused)]
     fn get_nb_point(&self) -> usize;
 
     fn search_filter(
@@ -276,7 +274,7 @@ mod tests {
         let query = vec![1.1, 2.1, 2.9, 3.9];
         let k: usize = 2;
         let result = index.search(
-            &SearchQuery::new(&query).with(&HnswSearchOption { ef_search: 20 }),
+            &SearchQuery::new(query).with(&HnswSearchOption { ef_search: 20 }),
             k,
         );
 
@@ -296,7 +294,7 @@ mod tests {
         let query = vec![1.1, 2.1, 2.9, 3.9, 5.0];
         let k: usize = 3;
         let original_result = index.search(
-            &SearchQuery::new(&query.clone()).with(&HnswSearchOption { ef_search: 20 }),
+            &SearchQuery::new(query.clone()).with(&HnswSearchOption { ef_search: 20 }),
             k,
         );
         assert!(
@@ -309,7 +307,7 @@ mod tests {
         let mut filter = IdFilter::new();
         filter.add_all(&labels[1..]);
         let result = index.search(
-            &SearchQuery::new(&query)
+            &SearchQuery::new(query)
                 .with(&HnswSearchOption { ef_search: 20 })
                 .with(&filter),
             k,

@@ -5,8 +5,8 @@ use crate::{filter::IdFilter, merror::IndexError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
-pub struct SearchQuery<'a> {
-    pub vector: &'a Vec<f32>,
+pub struct SearchQuery {
+    pub vector: Vec<f32>,
     pub id_filter: Option<IdFilter>,
 
     hnsw: Option<HnswSearchOption>,
@@ -33,8 +33,8 @@ impl SearchOption for IdFilter {
     }
 }
 
-impl<'a> SearchQuery<'a> {
-    pub fn new(vector: &'a Vec<f32>) -> Self {
+impl SearchQuery {
+    pub fn new(vector: Vec<f32>) -> Self {
         Self {
             vector,
             hnsw: None,
@@ -103,25 +103,5 @@ where
         if let Some(p) = self {
             p.set_params(params);
         }
-    }
-}
-
-struct MyStruct<'a> {
-    data: &'a str, // A reference field with a limited lifetime
-}
-
-impl<'a> MyStruct<'a> {
-    // Constructor
-    fn new(data: &'a str) -> Self {
-        Self { data }
-    }
-
-    // Setter method to update the reference field
-    fn set_data(&mut self, new_data: &'a str) {
-        self.data = new_data;
-    }
-
-    fn get_data(&self) -> &str {
-        self.data
     }
 }
