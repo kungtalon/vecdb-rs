@@ -72,7 +72,7 @@ pub struct HnswIndex {
 unsafe impl Send for HnswIndex {}
 unsafe impl Sync for HnswIndex {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswIndexOption {
     pub ef_construction: Option<u32>,
     pub max_elements: Option<u32>,

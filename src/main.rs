@@ -5,14 +5,19 @@ mod scalar;
 mod vecdb;
 
 use axum::{
-    extract::{Json, State},
+    extract::{rejection::JsonRejection, Json, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::post,
-    Router,
+    BoxError, Router,
 };
+use axum_extra::extract::WithRejection;
+use merror::ApiError;
 use serde::Serialize;
 use std::net::SocketAddr;
+use tower::ServiceBuilder;
 use tracing::{event, span, Level};
+use tracing_subscriber::fmt as tracing_fmt;
 
 use vecdb::{DocMap, IndexParams, VectorDatabase, VectorInsertArgs, VectorSearchArgs};
 
@@ -26,12 +31,23 @@ struct VectorUpsertResponse {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ErrorResponse {
+    message: String,
+}
+
 async fn handle_vector_search(
     State(mut vdb): State<VectorDatabase>,
-    Json(payload): Json<VectorSearchArgs>,
+    WithRejection(Json(payload), _): WithRejection<Json<VectorSearchArgs>, ApiError>,
 ) -> (StatusCode, Json<VectorSearchResponse>) {
-    let span = span!(Level::TRACE, "handle_vector_search", ?payload);
+    let span = span!(Level::TRACE, "handle_vector_search");
     let _enter = span.enter();
+
+    event!(
+        Level::INFO,
+        "Received search request with payload: {:?}",
+        payload
+    );
 
     let search_args = VectorSearchArgs {
         query: payload.query,
@@ -39,20 +55,35 @@ async fn handle_vector_search(
         k: payload.k,
         hnsw_params: payload.hnsw_params,
     };
-    let results = vdb.query(search_args).await.unwrap_or_else(|e| {
-        event!(Level::ERROR, "Error during vector search: {}", e);
-        vec![]
-    });
+    let results = vdb.query(search_args).await;
 
-    (StatusCode::OK, Json(VectorSearchResponse { results }))
+    match results {
+        Ok(results) => {
+            event!(Level::INFO, "Search successful");
+            (StatusCode::OK, Json(VectorSearchResponse { results }))
+        }
+        Err(e) => {
+            event!(Level::ERROR, "Error during vector search: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(VectorSearchResponse { results: vec![] }),
+            )
+        }
+    }
 }
 
 async fn handle_vector_upsert(
     State(mut vdb): State<VectorDatabase>,
-    Json(payload): Json<VectorInsertArgs>,
+    WithRejection(Json(payload), _): WithRejection<Json<VectorInsertArgs>, ApiError>,
 ) -> (StatusCode, Json<VectorUpsertResponse>) {
-    let span = span!(Level::TRACE, "handle_vector_search", ?payload);
+    let span = span!(Level::TRACE, "handle_vector_search");
     let _enter = span.enter();
+
+    event!(
+        Level::INFO,
+        "Received upsert request with payload: {:?}",
+        payload
+    );
 
     let results = vdb.upsert(payload).await;
 
@@ -78,8 +109,11 @@ async fn handle_vector_upsert(
 
 #[tokio::main]
 async fn main() {
+    let subscriber = tracing_fmt().with_max_level(Level::TRACE).finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
     let vdb: VectorDatabase = VectorDatabase::new(
-        "./test",
+        "./testdata",
         IndexParams {
             dim: 128,
             index_type: index::IndexType::Flat,
@@ -101,5 +135,7 @@ async fn main() {
         .await
         .expect("Failed to bind TCP listener");
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service())
+        .await
+        .unwrap();
 }

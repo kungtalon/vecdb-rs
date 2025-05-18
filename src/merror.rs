@@ -1,4 +1,10 @@
+use axum::{
+    extract::{rejection::JsonRejection, Json},
+    response::IntoResponse,
+};
+use serde_json::json;
 use thiserror::Error;
+use tracing::{event, Level};
 
 #[derive(Error, Debug)]
 #[allow(unused, clippy::enum_variant_names)]
@@ -26,4 +32,31 @@ pub enum IndexError {
     QueryError(String),
     #[error("got unexpected error from index: {0}")]
     UnexpectedError(String),
+}
+
+#[derive(Debug, Error)]
+pub enum ApiError {
+    // The `#[from]` attribute generates `From<JsonRejection> for ApiError`
+    // implementation. See `thiserror` docs for more information
+    #[error(transparent)]
+    JsonExtractorRejection(#[from] JsonRejection),
+}
+
+// We implement `IntoResponse` so ApiError can be used as a response
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        event!(Level::INFO, "request rejected: {}", self);
+
+        let (status, message) = match self {
+            ApiError::JsonExtractorRejection(json_rejection) => {
+                (json_rejection.status(), json_rejection.body_text())
+            }
+        };
+
+        let payload = json!({
+            "message": message,
+        });
+
+        (status, Json(payload)).into_response()
+    }
 }

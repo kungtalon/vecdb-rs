@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::vec;
 use tokio::task;
+use tower::filter;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex, RwLock};
+use tracing::{event, Level};
 
 use crate::filter::{IdFilter, IntFilterIndex, IntFilterInput};
 use crate::index::*;
@@ -16,6 +18,8 @@ use crate::scalar::{new_scalar_storage, ScalarStorage};
 pub type DocMap = HashMap<String, Value>;
 
 pub struct VectorDatabase {
+    params: Arc<IndexParams>,
+
     scalar_storage: Arc<RwLock<dyn ScalarStorage>>,
     vector_index: Arc<Mutex<dyn Index + Send>>,
     filter_index: Arc<RwLock<IntFilterIndex>>,
@@ -24,6 +28,7 @@ pub struct VectorDatabase {
 impl Clone for VectorDatabase {
     fn clone(&self) -> Self {
         Self {
+            params: Arc::clone(&self.params),
             scalar_storage: Arc::clone(&self.scalar_storage),
             vector_index: Arc::clone(&self.vector_index),
             filter_index: Arc::clone(&self.filter_index),
@@ -31,7 +36,7 @@ impl Clone for VectorDatabase {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IndexParams {
     pub dim: u32,
     pub metric_type: MetricType,
@@ -61,6 +66,8 @@ pub struct VectorSearchArgs {
 
 impl VectorDatabase {
     pub fn new<D: AsRef<Path>>(db_path: D, index_params: IndexParams) -> Result<Self, DBError> {
+        let index_params_copy = index_params.clone();
+
         let db_path = PathBuf::new().join(db_path);
         let scalar_storage = Arc::new(RwLock::new(new_scalar_storage(db_path)?));
         let vector_index: Arc<Mutex<dyn Index + Send>> = match index_params.index_type {
@@ -88,6 +95,7 @@ impl VectorDatabase {
         };
 
         Ok(Self {
+            params: Arc::new(index_params_copy),
             scalar_storage,
             vector_index,
             filter_index: Arc::new(RwLock::new(IntFilterIndex::new())),
@@ -115,6 +123,8 @@ impl VectorDatabase {
 
             ids = scalar_storage_writer.gen_incr_ids(args.data_row)?;
         }
+
+        event!(Level::DEBUG, "upsert vector data with ids: {:?}", ids);
 
         {
             let vector_index_writer = Arc::clone(&self.vector_index);
@@ -144,25 +154,40 @@ impl VectorDatabase {
             })??;
         }
 
-        for (i, doc) in args.docs.iter().enumerate() {
+        for ((i, doc), attr) in args
+            .docs
+            .into_iter()
+            .enumerate()
+            .zip(args.attributes.into_iter())
+        {
             let mut doc_map = match doc {
                 Some(m) => m.clone().to_owned(),
                 None => HashMap::new(),
             };
-            self.insert_doc(&mut doc_map, ids[i]).await?;
-        }
 
-        for (i, attr) in args.attributes.iter().enumerate() {
-            if let Some(attr_map) = attr {
-                self.insert_attribute(attr_map, ids[i]).await?;
+            let attr_map = attr.unwrap_or_default();
+
+            self.insert_doc(&mut doc_map, &attr_map, ids[i]).await?;
+
+            if !attr_map.is_empty() {
+                self.insert_attribute(&attr_map, ids[i]).await?;
             }
         }
 
         Ok(())
     }
 
-    async fn insert_doc(&mut self, doc: &mut DocMap, id: u64) -> Result<(), DBError> {
+    async fn insert_doc(
+        &mut self,
+        doc: &mut DocMap,
+        attributes: &HashMap<String, Value>,
+        id: u64,
+    ) -> Result<(), DBError> {
         doc.insert("id".to_string(), Value::Number(id.into()));
+        doc.insert(
+            "attributes".to_string(),
+            serde_json::to_value(attributes).unwrap(),
+        );
 
         let doc_bytes = serde_json::to_vec(&doc)
             .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
@@ -213,15 +238,30 @@ impl VectorDatabase {
 
     pub async fn query(&mut self, search_args: VectorSearchArgs) -> Result<Vec<DocMap>, DBError> {
         let mut query = SearchQuery::new(search_args.query);
+
+        if query.vector.len() != self.params.dim as usize {
+            return Err(DBError::GetError(format!(
+                "query vector length {} does not match index dimension {}",
+                query.vector.len(),
+                self.params.dim,
+            )));
+        }
+
         if search_args.hnsw_params.is_some() {
             query = query.with(search_args.hnsw_params.as_ref().unwrap());
         }
-        if search_args.filter_inputs.is_some() {
-            let mut bitmap = roaring::RoaringBitmap::new();
-            for filter in search_args.filter_inputs.unwrap() {
-                bitmap = self.filter_index.read().unwrap().apply(&filter, &bitmap);
+
+        match &search_args.filter_inputs {
+            Some(filter_inputs) if !filter_inputs.is_empty() => {
+                let mut bitmap = roaring::RoaringBitmap::new();
+
+                for filter in search_args.filter_inputs.unwrap() {
+                    bitmap = self.filter_index.read().unwrap().apply(&filter, &bitmap);
+                }
+
+                query = query.with(&IdFilter::from(bitmap));
             }
-            query = query.with(&IdFilter::from(bitmap));
+            _ => {}
         }
 
         let vector_index = Arc::clone(&self.vector_index);
@@ -241,7 +281,7 @@ impl VectorDatabase {
             ))
         })??;
 
-        println!("search result inside: {:?}", search_result);
+        event!(Level::DEBUG, "search result inside: {:?}", search_result);
 
         if search_result.labels.is_empty() {
             return Ok(vec![]);
