@@ -11,14 +11,13 @@ type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 const KEY_ID_MAX: &str = "__id_max__";
 
 pub trait ScalarStorage: Sync + Send {
-    fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError>;
+    fn put(&mut self, key: &[u8], values: &[u8]) -> Result<(), DBError>;
 
-    #[allow(unused)]
-    fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError>;
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DBError>;
 
     #[allow(unused)]
     fn get_value(&self, index: u64) -> Result<Option<HashMap<String, Value>>, DBError> {
-        match self.get(index)? {
+        match self.get(&index.to_be_bytes())? {
             Some(bytes) => {
                 let value = serde_json::from_slice::<HashMap<String, Value>>(&bytes)
                     .map_err(|e| DBError::GetError(e.to_string()))?;
@@ -32,6 +31,8 @@ pub trait ScalarStorage: Sync + Send {
 
     // Generates a list of unique IDs starting from the last ID used
     fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError>;
+
+    fn to_iter(&self) -> rocksdb::DBIteratorWithThreadMode<Mdb>;
 }
 
 pub fn new_scalar_storage<P: AsRef<Path>>(path: P) -> Result<impl ScalarStorage, DBError> {
@@ -57,17 +58,14 @@ impl MultiThreadRocksDB {
 }
 
 impl ScalarStorage for MultiThreadRocksDB {
-    fn put(&mut self, index: u64, values: &[u8]) -> Result<(), DBError> {
-        let key = index.to_be_bytes();
-
+    fn put(&mut self, key: &[u8], values: &[u8]) -> Result<(), DBError> {
         self.db
             .put(key, values)
             .map_err(|e| DBError::PutError(e.to_string()))?;
         Ok(())
     }
 
-    fn get(&self, index: u64) -> Result<Option<Vec<u8>>, DBError> {
-        let key = index.to_be_bytes();
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DBError> {
         match self
             .db
             .get(key)
@@ -109,6 +107,10 @@ impl ScalarStorage for MultiThreadRocksDB {
 
         gen_incr_ids(&mut self.db, num)
     }
+
+    fn to_iter(&self) -> rocksdb::DBIteratorWithThreadMode<Mdb> {
+        self.db.iterator(rocksdb::IteratorMode::Start)
+    }
 }
 
 fn gen_incr_ids<T: rocksdb::ThreadMode>(
@@ -138,6 +140,43 @@ fn gen_incr_ids<T: rocksdb::ThreadMode>(
     Ok(ids)
 }
 
+#[cfg(debug_assertions)]
+pub fn debug_print_scalar_db(ss: &dyn ScalarStorage) -> Result<(), DBError> {
+    let iter = ss.to_iter();
+
+    let special: [u8; 10] = [95, 95, 105, 100, 95, 109, 97, 120, 95, 95];
+
+    for data in iter {
+        let data_pair: (Box<[u8]>, Box<[u8]>) = data.unwrap();
+
+        if data_pair.0.len() == special.len() {
+            println!(
+                "max id: {:?}",
+                u64::from_be_bytes(data_pair.1.to_vec().try_into().unwrap())
+            );
+
+            continue;
+        }
+
+        let key_temp: Result<[u8; 8], _> = data_pair.0.to_vec().try_into();
+        let mut key: u64 = 0;
+
+        match key_temp {
+            Ok(k) => key = u64::from_be_bytes(k),
+            Err(e) => {
+                println!("failed to convert key to u64: {:?}", e)
+            }
+        }
+
+        let value = String::from_utf8(data_pair.1.to_vec()).map_err(|e| {
+            DBError::GetError("failed to get value from scalar db".to_string() + &e.to_string())
+        })?;
+        println!("Key: {:?}, Value: {:?}", key, value);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,14 +202,14 @@ mod tests {
         let key2 = 2u64;
         let msg2 = "Goodbye, world";
         db.put(
-            key1,
+            &key1.to_be_bytes(),
             serde_json::to_vec(&HashMap::from([("msg", msg1)]))
                 .unwrap()
                 .as_ref(),
         )
         .unwrap();
         db.put(
-            key2,
+            &key2.to_be_bytes(),
             serde_json::to_vec(&HashMap::from([("msg", msg2)]))
                 .unwrap()
                 .as_ref(),
@@ -197,7 +236,7 @@ mod tests {
             ),
         ]);
         let value_bytes = serde_json::to_vec(&value).unwrap();
-        db.put(key, &value_bytes).unwrap();
+        db.put(&key.to_be_bytes(), &value_bytes).unwrap();
 
         let retrieved_value = db.get_value(key).unwrap().expect("failed to get value");
         assert_eq!(retrieved_value, value);

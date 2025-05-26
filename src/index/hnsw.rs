@@ -201,14 +201,14 @@ impl Index for HnswIndex {
                 self.index
                     .search_filter(&query.vector, k, hnsw_opt.ef_search as usize, filter);
 
-            return Ok(SearchResult::from(neighbours));
+            return Ok(neighbours.into());
         }
 
         let neighbours =
             self.index
                 .search_neighbours(&query.vector, k, hnsw_opt.ef_search as usize);
 
-        Ok(SearchResult::from(neighbours))
+        Ok(neighbours.into())
     }
 }
 

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 
+[profile.dev]
+debug = true
+debug-assertions = true
+
 [dependencies]
 thiserror = "2.0.11"
 faiss = { features = ["static"], path = "faiss-rs" }
