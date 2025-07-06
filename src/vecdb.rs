@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use tracing::{event, Level};
 
 use crate::filter::{IdFilter, IntFilterIndex, IntFilterInput};
-use crate::index::*;
 use crate::merror::DBError;
 use crate::scalar::{new_scalar_storage, ScalarStorage};
+use crate::{index::*, scalar};
 
 pub type DocMap = HashMap<String, Value>;
 
@@ -118,7 +118,9 @@ impl VectorDatabase {
             )));
         }
 
-        let ids: Vec<u64> = self.scalar_storage.gen_incr_ids(args.data_row)?;
+        let ids: Vec<u64> = self
+            .scalar_storage
+            .gen_incr_ids(scalar::NAMESPACE_DOCS, args.data_row)?;
 
         event!(Level::DEBUG, "upsert vector data with ids: {:?}", ids);
 

@@ -9,6 +9,8 @@ use std::sync::Mutex;
 type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
 const KEY_ID_MAX: &str = "__id_max__";
+pub const NAMESPACE_DOCS: &str = "docs";
+pub const NAMESPACE_WALLOGS: &str = "wal_logs";
 
 pub trait ScalarStorage: Sync + Send {
     fn put(&self, key: &[u8], values: &[u8]) -> Result<(), DBError>;
@@ -30,7 +32,7 @@ pub trait ScalarStorage: Sync + Send {
     fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError>;
 
     // Generates a list of unique IDs starting from the last ID used
-    fn gen_incr_ids(&self, num: usize) -> Result<Vec<u64>, DBError>;
+    fn gen_incr_ids(&self, namespace: &str, num: usize) -> Result<Vec<u64>, DBError>;
 
     fn to_iter(&self) -> rocksdb::DBIteratorWithThreadMode<Mdb>;
 }
@@ -99,13 +101,13 @@ impl ScalarStorage for MultiThreadRocksDB {
         Ok(result)
     }
 
-    fn gen_incr_ids(&self, num: usize) -> Result<Vec<u64>, DBError> {
+    fn gen_incr_ids(&self, namespace: &str, num: usize) -> Result<Vec<u64>, DBError> {
         let _guard = self
             .id_mutex
             .lock()
             .map_err(|e| DBError::GetError(format!("failed to acquire lock: {e:?}",)))?;
 
-        gen_incr_ids(&self.db, num)
+        gen_incr_ids(&self.db, namespace, num)
     }
 
     fn to_iter(&self) -> rocksdb::DBIteratorWithThreadMode<Mdb> {
@@ -115,10 +117,11 @@ impl ScalarStorage for MultiThreadRocksDB {
 
 fn gen_incr_ids<T: rocksdb::ThreadMode>(
     db: &rocksdb::DBWithThreadMode<T>,
+    namespace: &str,
     num: usize,
 ) -> Result<Vec<u64>, DBError> {
     let max_id_as_bytes = db
-        .get(KEY_ID_MAX.as_bytes())
+        .get(format!("{namespace}{KEY_ID_MAX}").as_bytes())
         .map_err(|e| DBError::GetError(e.to_string()))?;
 
     let max_id: u64 =

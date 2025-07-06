@@ -3,6 +3,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde_json::json;
+use std::fmt::Display;
 use thiserror::Error;
 use tracing::{event, Level};
 
@@ -17,6 +18,8 @@ pub enum DBError {
     GetError(String),
     #[error("failed to put data into database: {0}")]
     PutError(String),
+    #[error("failed to sync data in database: {0}")]
+    SyncError(String),
     #[error("failed to delete data from database: {0}")]
     DeleteDataError(String),
 }
@@ -32,6 +35,15 @@ pub enum IndexError {
     QueryError(String),
     #[error("got unexpected error from index: {0}")]
     UnexpectedError(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub struct FileError(pub String);
+
+impl Display for FileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 #[derive(Debug, Error)]

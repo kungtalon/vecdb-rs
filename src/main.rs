@@ -1,6 +1,7 @@
 mod filter;
 mod index;
 mod merror;
+mod persistence;
 mod scalar;
 mod vecdb;
 
