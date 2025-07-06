@@ -163,14 +163,14 @@ pub fn debug_print_scalar_db(ss: &dyn ScalarStorage) -> Result<(), DBError> {
         match key_temp {
             Ok(k) => key = u64::from_be_bytes(k),
             Err(e) => {
-                println!("failed to convert key to u64: {:?}", e)
+                println!("failed to convert key to u64: {e:?}")
             }
         }
 
         let value = String::from_utf8(data_pair.1.to_vec()).map_err(|e| {
             DBError::GetError("failed to get value from scalar db".to_string() + &e.to_string())
         })?;
-        println!("Key: {:?}, Value: {:?}", key, value);
+        println!("Key: {key:?}, Value: {value:?}");
     }
 
     Ok(())

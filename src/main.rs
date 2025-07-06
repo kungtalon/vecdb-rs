@@ -149,7 +149,7 @@ async fn main() {
         .with_state(vdb);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], app_config.server.port));
-    println!("Server listening on {}", addr);
+    println!("Server listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

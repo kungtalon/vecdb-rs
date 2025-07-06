@@ -159,7 +159,7 @@ mod tests {
 
         assert!(result.is_ok());
         let search_result = result.unwrap();
-        println!("{:?}", search_result);
+        println!("{search_result:?}");
         assert_eq!(search_result.labels.len(), k);
         assert_eq!(search_result.labels[0], labels[0]);
     }
@@ -168,11 +168,7 @@ mod tests {
     fn test_search_with_params() {
         let (mut index, data, labels) = setup(4, 5, MetricType::L2);
         let insert_result = index.insert(&InsertParams::new(&data, &labels));
-        assert!(
-            insert_result.is_ok(),
-            "error from insert {:?}",
-            insert_result
-        );
+        assert!(insert_result.is_ok(), "error from insert {insert_result:?}",);
 
         let query = vec![1.1, 2.1, 2.9, 3.9, 5.0];
         let k: usize = 3;

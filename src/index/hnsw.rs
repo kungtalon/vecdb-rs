@@ -280,7 +280,7 @@ mod tests {
 
         assert!(result.is_ok(), "error from search {:?}", result.err());
         let search_result = result.unwrap();
-        println!("{:?}", search_result);
+        println!("{search_result:?}");
         assert_eq!(search_result.labels.len(), k);
         assert_eq!(search_result.labels[0], labels[0]);
     }
