@@ -4,6 +4,7 @@ use faiss::index::Idx;
 use faiss::selector::IdSelector;
 use hnsw_rs::hnsw::FilterT;
 use hnsw_rs::prelude::DataId;
+#[allow(unused_imports)]
 pub use index::{FilterOp, IntFilterIndex, IntFilterInput};
 use roaring::RoaringBitmap;
 use std::fmt::Debug;
@@ -11,6 +12,7 @@ use std::fmt::Debug;
 #[derive(Debug, Clone)]
 pub struct IdFilter(RoaringBitmap);
 
+#[allow(dead_code)]
 impl IdFilter {
     pub fn new() -> Self {
         Self(RoaringBitmap::new())

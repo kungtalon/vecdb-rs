@@ -69,6 +69,7 @@ pub struct HnswParams {
     pub parallel: bool,
 }
 
+#[allow(dead_code)]
 impl<'a> InsertParams<'a> {
     pub fn new(data: &'a NMatrix<f32>, labels: &'a Vec<u64>) -> Self {
         Self {

@@ -11,7 +11,7 @@ type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 const KEY_ID_MAX: &str = "__id_max__";
 
 pub trait ScalarStorage: Sync + Send {
-    fn put(&mut self, key: &[u8], values: &[u8]) -> Result<(), DBError>;
+    fn put(&self, key: &[u8], values: &[u8]) -> Result<(), DBError>;
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DBError>;
 
@@ -30,7 +30,7 @@ pub trait ScalarStorage: Sync + Send {
     fn multi_get_value(&self, indices: &[u64]) -> Result<Vec<HashMap<String, Value>>, DBError>;
 
     // Generates a list of unique IDs starting from the last ID used
-    fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError>;
+    fn gen_incr_ids(&self, num: usize) -> Result<Vec<u64>, DBError>;
 
     fn to_iter(&self) -> rocksdb::DBIteratorWithThreadMode<Mdb>;
 }
@@ -41,7 +41,7 @@ pub fn new_scalar_storage<P: AsRef<Path>>(path: P) -> Result<impl ScalarStorage,
 }
 
 struct MultiThreadRocksDB {
-    mutex: Mutex<()>,
+    id_mutex: Mutex<()>,
     db: Mdb,
 }
 
@@ -51,14 +51,14 @@ impl MultiThreadRocksDB {
         options.create_if_missing(true);
         let db = Mdb::open(&options, path).map_err(|e| DBError::CreateError(e.to_string()))?;
         Ok(MultiThreadRocksDB {
-            mutex: Mutex::new(()),
+            id_mutex: Mutex::new(()),
             db,
         })
     }
 }
 
 impl ScalarStorage for MultiThreadRocksDB {
-    fn put(&mut self, key: &[u8], values: &[u8]) -> Result<(), DBError> {
+    fn put(&self, key: &[u8], values: &[u8]) -> Result<(), DBError> {
         self.db
             .put(key, values)
             .map_err(|e| DBError::PutError(e.to_string()))?;
@@ -99,13 +99,13 @@ impl ScalarStorage for MultiThreadRocksDB {
         Ok(result)
     }
 
-    fn gen_incr_ids(&mut self, num: usize) -> Result<Vec<u64>, DBError> {
+    fn gen_incr_ids(&self, num: usize) -> Result<Vec<u64>, DBError> {
         let _guard = self
-            .mutex
+            .id_mutex
             .lock()
-            .map_err(|e| DBError::GetError(format!("failed to acquire lock: {:?}", e)))?;
+            .map_err(|e| DBError::GetError(format!("failed to acquire lock: {e:?}",)))?;
 
-        gen_incr_ids(&mut self.db, num)
+        gen_incr_ids(&self.db, num)
     }
 
     fn to_iter(&self) -> rocksdb::DBIteratorWithThreadMode<Mdb> {
@@ -114,28 +114,27 @@ impl ScalarStorage for MultiThreadRocksDB {
 }
 
 fn gen_incr_ids<T: rocksdb::ThreadMode>(
-    db: &mut rocksdb::DBWithThreadMode<T>,
+    db: &rocksdb::DBWithThreadMode<T>,
     num: usize,
 ) -> Result<Vec<u64>, DBError> {
     let max_id_as_bytes = db
         .get(KEY_ID_MAX.as_bytes())
         .map_err(|e| DBError::GetError(e.to_string()))?;
 
-    let max_id: u64 = match max_id_as_bytes {
-        Some(bytes) => u64::from_be_bytes(bytes.try_into().map_err(|e| {
-            DBError::GetError(format!("failed to convert incr ID as u64: {:?}", e))
-        })?),
-        None => 0,
-    };
+    let max_id: u64 =
+        match max_id_as_bytes {
+            Some(bytes) => u64::from_be_bytes(bytes.try_into().map_err(|e| {
+                DBError::GetError(format!("failed to convert incr ID as u64: {e:?}"))
+            })?),
+            None => 0,
+        };
 
     let new_max_id = max_id + num as u64;
 
     let ids: Vec<u64> = (max_id + 1..new_max_id + 1).collect::<Vec<u64>>();
 
     db.put(KEY_ID_MAX.as_bytes(), new_max_id.to_be_bytes())
-        .map_err(|e| {
-            DBError::PutError(format!("failed to insert new generated max id: {:?}", e))
-        })?;
+        .map_err(|e| DBError::PutError(format!("failed to insert new generated max id: {e:?}")))?;
 
     Ok(ids)
 }

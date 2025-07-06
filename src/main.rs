@@ -5,18 +5,16 @@ mod scalar;
 mod vecdb;
 
 use axum::{
-    extract::{rejection::JsonRejection, Json, State},
+    extract::{Json, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::post,
-    BoxError, Router,
+    Router,
 };
 use axum_extra::extract::WithRejection;
 use merror::ApiError;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::str::FromStr;
-use tower::ServiceBuilder;
 use tracing::{event, span, Level};
 use tracing_subscriber::fmt as tracing_fmt;
 
@@ -44,11 +42,6 @@ struct VectorSearchResponse {
 
 #[derive(Debug, Serialize)]
 struct VectorUpsertResponse {
-    message: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
     message: String,
 }
 
@@ -112,11 +105,11 @@ async fn handle_vector_upsert(
             (StatusCode::OK, Json(response))
         }
         Err(e) => {
-            event!(Level::ERROR, "Error during vector upsert: {}", e);
+            event!(Level::ERROR, "Error during vector upsert: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(VectorUpsertResponse {
-                    message: format!("Error during vector upsert: {}", e),
+                    message: format!("Error during vector upsert: {e}"),
                 }),
             )
         }

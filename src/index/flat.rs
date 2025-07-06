@@ -36,7 +36,7 @@ impl Index for FlatIndex {
         let mut index_guard = self
             .index
             .lock()
-            .map_err(|e| IndexError::UnexpectedError(format!("Failed to lock index: {}", e)))?;
+            .map_err(|e| IndexError::UnexpectedError(format!("Failed to lock index: {e}")))?;
 
         if params.data.nrows() != params.labels.len() {
             return Err(IndexError::InsertionError(format!(
@@ -79,7 +79,7 @@ impl Index for FlatIndex {
         let mut index_guard = self
             .index
             .lock()
-            .map_err(|e| IndexError::UnexpectedError(format!("Failed to lock index: {}", e)))?;
+            .map_err(|e| IndexError::UnexpectedError(format!("Failed to lock index: {e}")))?;
 
         // if k is bigger than ntotal, set k to ntotal
         // othewise faiss will return undefined data

@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::vec;
 use tokio::task;
-use tower::filter;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,7 +19,7 @@ pub type DocMap = HashMap<String, Value>;
 pub struct VectorDatabase {
     params: Arc<IndexParams>,
 
-    scalar_storage: Arc<RwLock<dyn ScalarStorage>>,
+    scalar_storage: Arc<dyn ScalarStorage>,
     vector_index: Arc<Mutex<dyn Index + Send>>,
     filter_index: Arc<RwLock<IntFilterIndex>>,
 }
@@ -69,13 +68,13 @@ impl VectorDatabase {
         let index_params_copy = index_params.clone();
 
         let db_path = PathBuf::new().join(db_path);
-        let scalar_storage = Arc::new(RwLock::new(new_scalar_storage(db_path)?));
+        let scalar_storage = Arc::new(new_scalar_storage(db_path)?);
         let vector_index: Arc<Mutex<dyn Index + Send>> = match index_params.index_type {
             IndexType::Flat => {
                 // Create a flat index
                 Arc::new(Mutex::new(
                     FlatIndex::new(index_params.dim, index_params.metric_type).map_err(|e| {
-                        DBError::CreateError(format!("unable to create vector index: {}", e))
+                        DBError::CreateError(format!("unable to create vector index: {e}"))
                     })?,
                 ))
             }
@@ -88,7 +87,7 @@ impl VectorDatabase {
                         index_params.hnsw_params,
                     )
                     .map_err(|e| {
-                        DBError::CreateError(format!("unable to create vector index: {}", e))
+                        DBError::CreateError(format!("unable to create vector index: {e}"))
                     })?,
                 ))
             }
@@ -115,17 +114,11 @@ impl VectorDatabase {
             );
 
             return Err(DBError::PutError(format!(
-                "unexpected length of field {}: {}, expected length is {}",
-                mismatch_field, mismatch_value, expect_value,
+                "unexpected length of field {mismatch_field}: {mismatch_value}, expected length is {expect_value}",
             )));
         }
 
-        let ids: Vec<u64>;
-        {
-            let mut scalar_storage_writer = self.scalar_storage.write().unwrap();
-
-            ids = scalar_storage_writer.gen_incr_ids(args.data_row)?;
-        }
+        let ids: Vec<u64> = self.scalar_storage.gen_incr_ids(args.data_row)?;
 
         event!(Level::DEBUG, "upsert vector data with ids: {:?}", ids);
 
@@ -166,7 +159,7 @@ impl VectorDatabase {
     ) -> Result<(), DBError> {
         let insert_data =
             Array::from_shape_vec((args.data_row, args.data_dim), args.flat_data.clone()).map_err(
-                |e| DBError::PutError(format!("unable to create array from flat data: {}", e)),
+                |e| DBError::PutError(format!("unable to create array from flat data: {e}")),
             )?;
 
         let vector_index_writer = Arc::clone(&self.vector_index);
@@ -183,14 +176,13 @@ impl VectorDatabase {
                 .lock()
                 .unwrap()
                 .insert(&index_insert_params)
-                .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {}", e)))
+                .map_err(|e| DBError::PutError(format!("unable to upsert vector data: {e}")))
         })
         .await;
 
         res_async_insert.map_err(|e| {
             DBError::PutError(format!(
-                "error while inserting vector database asynchronously: {}",
-                e
+                "error while inserting vector database asynchronously: {e}",
             ))
         })??;
 
@@ -210,22 +202,19 @@ impl VectorDatabase {
         );
 
         let doc_bytes = serde_json::to_vec(&doc)
-            .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {}", e)))?;
+            .map_err(|e| DBError::PutError(format!("unable to serialize doc data: {e}")))?;
 
         let scalar_storage = Arc::clone(&self.scalar_storage);
         task::spawn_blocking(move || {
             scalar_storage
-                .write()
-                .unwrap()
                 .put(&id.to_be_bytes(), &doc_bytes)
-                .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {}", e)))?;
+                .map_err(|e| DBError::PutError(format!("unable to upsert scalar data: {e}")))?;
             Ok(())
         })
         .await
         .map_err(|e| {
             DBError::PutError(format!(
-                "error while inserting scalar data asynchronously: {}",
-                e
+                "error while inserting scalar data asynchronously: {e}",
             ))
         })??;
 
@@ -246,8 +235,7 @@ impl VectorDatabase {
                 }
                 _ => {
                     return Err(DBError::PutError(format!(
-                        "unsupported attribute type for key {}: {:?}",
-                        key, value
+                        "unsupported attribute type for key {key}: {value:?}",
                     )));
                 }
             }
@@ -291,17 +279,16 @@ impl VectorDatabase {
                 .lock()
                 .unwrap()
                 .search(&query, search_args.k)
-                .map_err(|e| DBError::GetError(format!("unable to query vector data: {}", e)))
+                .map_err(|e| DBError::GetError(format!("unable to query vector data: {e}")))
         })
         .await
         .map_err(|e| {
             DBError::GetError(format!(
-                "error while querying vector database asynchronously: {}",
-                e
+                "error while querying vector database asynchronously: {e}",
             ))
         })??;
 
-        event!(Level::DEBUG, "search result inside: {:?}", search_result);
+        event!(Level::DEBUG, "search result inside: {search_result:?}");
 
         if search_result.labels.is_empty() {
             return Ok(vec![]);
@@ -310,20 +297,15 @@ impl VectorDatabase {
         #[cfg(debug_assertions)]
         {
             use crate::scalar::debug_print_scalar_db;
-            let scalar_storage = self.scalar_storage.read().unwrap();
 
             event!(
                 Level::DEBUG,
                 "start printing all contents in scalar storage",
             );
-            debug_print_scalar_db(&*scalar_storage)?;
+            debug_print_scalar_db(&*self.scalar_storage)?;
         }
 
-        let documents = self
-            .scalar_storage
-            .read()
-            .unwrap()
-            .multi_get_value(&search_result.labels)?;
+        let documents = self.scalar_storage.multi_get_value(&search_result.labels)?;
 
         Ok(documents)
     }
