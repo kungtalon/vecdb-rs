@@ -13,13 +13,29 @@ use axum::{
 };
 use axum_extra::extract::WithRejection;
 use merror::ApiError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::str::FromStr;
 use tower::ServiceBuilder;
 use tracing::{event, span, Level};
 use tracing_subscriber::fmt as tracing_fmt;
 
 use vecdb::{DocMap, IndexParams, VectorDatabase, VectorInsertArgs, VectorSearchArgs};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    pub index: IndexParams,
+    pub file_path: String,
+    pub server: ServerConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    pub search_url_suffix: String,
+    pub upsert_url_suffix: String,
+    pub port: u16,
+    pub log_level: String,
+}
 
 #[derive(Debug, Serialize)]
 struct VectorSearchResponse {
@@ -107,28 +123,39 @@ async fn handle_vector_upsert(
     }
 }
 
+fn parse_settings() -> Result<AppConfig, config::ConfigError> {
+    let setting = config::Config::builder()
+        .add_source(config::File::with_name("config.toml"))
+        .build()?;
+
+    let dec_setting: AppConfig = setting.try_deserialize()?;
+
+    Ok(dec_setting)
+}
+
 #[tokio::main]
 async fn main() {
-    let subscriber = tracing_fmt().with_max_level(Level::TRACE).finish();
+    let app_config = parse_settings().unwrap();
+
+    let subscriber = tracing_fmt()
+        .with_max_level(Level::from_str(app_config.server.log_level.as_str()).unwrap())
+        .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let vdb: VectorDatabase = VectorDatabase::new(
-        "./testdata",
-        IndexParams {
-            dim: 128,
-            index_type: index::IndexType::Flat,
-            metric_type: index::MetricType::L2,
-            hnsw_params: None,
-        },
-    )
-    .unwrap();
+    let vdb: VectorDatabase = VectorDatabase::new(app_config.file_path, app_config.index).unwrap();
 
     let app = Router::new()
-        .route("/search", post(handle_vector_search))
-        .route("/upsert", post(handle_vector_upsert))
-        .with_state(vdb.clone());
+        .route(
+            &app_config.server.search_url_suffix,
+            post(handle_vector_search),
+        )
+        .route(
+            &app_config.server.upsert_url_suffix,
+            post(handle_vector_upsert),
+        )
+        .with_state(vdb);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 7000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], app_config.server.port));
     println!("Server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)

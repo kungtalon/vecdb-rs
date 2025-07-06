@@ -29,6 +29,7 @@ tracing = { version = "0.1", features = ["log"] }
 tracing-subscriber = "0.3.19"
 tower = { version = "0.5.2", features = ["full"] }
 hyper = "1.6"
+config = "0.15"
 
 [dependencies.faiss-sys]
 version = "0.6.3-alpha.0"

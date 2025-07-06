@@ -16,6 +16,7 @@ pub trait Index {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum IndexType {
     Flat,
     Hnsw,
@@ -53,7 +54,7 @@ impl From<Vec<Neighbour>> for SearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum MetricType {
     IP = 0,
     L2 = 1,

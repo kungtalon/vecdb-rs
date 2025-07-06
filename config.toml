@@ -1,0 +1,12 @@
+file_path = "./testdata"
+
+[index]
+dim = 128
+metric_type = "L2"
+index_type = "flat"
+
+[server]
+search_url_suffix = "/search"
+upsert_url_suffix = "/upsert"
+port = 7000
+log_level = "debug"
