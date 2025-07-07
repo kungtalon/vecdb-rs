@@ -1,5 +1,6 @@
-use crate::merror::FileError;
+use crate::merror::{DataError, FileError};
 use crate::scalar::ScalarStorage;
+use flate2::{write::GzEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
@@ -21,12 +22,14 @@ pub struct WALLogRecord<'a> {
     pub log_id: u64,
     pub version: String,
     pub operation: WALLogOperation,
-    pub encoded_data: &'a [u8],
+    pub data: &'a [u8],
 }
 
 pub struct Persistence {
     pub counter: AtomicU64,
     pub wal_log_file: File,
+
+    encoder: Option<Encoder>,
 }
 
 fn new_persistence(
@@ -61,6 +64,7 @@ fn new_persistence(
     Ok(Persistence {
         counter: AtomicU64::new(init_counter),
         wal_log_file,
+        encoder: None,
     })
 }
 
@@ -80,9 +84,22 @@ impl Persistence {
         self.counter.fetch_add(1, Ordering::AcqRel)
     }
 
-    pub fn write_wal_log(&mut self, record: &WALLogRecord) -> Result<(), FileError> {
+    pub fn with_encoder(self, encoder: Encoder) {
+        self.encoder = Some(encoder.clone());
+    }
+
+    pub async fn write_wal_log(&mut self, record: WALLogRecord) -> Result<(), FileError> {
+        if self.encoder.is_some() {
+            if let Some(encoder) = &self.encoder {
+                // Encode the data using the encoder
+                record.data = &encoder
+                    .encode(record.data)
+                    .map_err(|e| FileError(format!("Failed to encode data for WAL log: {e}")))?;
+            }
+        }
+
         let json_record = serde_json::to_string(&record)
-            .map_err(|e| FileError(format!("Failed to serialize WAL log record: {e}")))?;
+            .map_err(|e| DataError(format!("Failed to serialize WAL log record: {e}")))?;
 
         event!(
             tracing::Level::DEBUG,
@@ -94,5 +111,38 @@ impl Persistence {
             .map_err(|e| FileError(format!("Failed to write operation: {e}")))?;
 
         Ok(())
+    }
+}
+
+pub enum Encoding {
+    Gzip,
+    // Add other encodings if needed
+}
+
+// Encoder is responsible for compressing and encoding the user data for WAL log
+pub struct Encoder {
+    pub encoding: Encoding,
+}
+
+impl Encoder {
+    pub fn new(encoding: Encoding) -> Encoder {
+        Encoder { encoding }
+    }
+
+    pub fn encode(&self, data: &[u8]) -> Result<Vec<u8>, DataError> {
+        match self.encoding {
+            Encoding::Gzip => Self::gzip_encode(data),
+            // Add other encodings if needed
+        }
+    }
+
+    fn gzip_encode(data: &[u8]) -> Result<Vec<u8>, DataError> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(data)
+            .map_err(|e| DataError(format!("Failed to write to encoder: {e}")))?;
+        encoder
+            .finish()
+            .map_err(|e| DataError(format!("Failed to finish encoding: {e}")))
     }
 }

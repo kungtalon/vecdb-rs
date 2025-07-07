@@ -46,6 +46,15 @@ impl Display for FileError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub struct DataError(pub String);
+
+impl Display for DataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     // The `#[from]` attribute generates `From<JsonRejection> for ApiError`
