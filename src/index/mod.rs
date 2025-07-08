@@ -16,7 +16,7 @@ pub trait Index {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "PascalCase")]
 pub enum IndexType {
     Flat,
     Hnsw,

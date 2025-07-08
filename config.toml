@@ -3,7 +3,7 @@ file_path = "./testdata"
 [index]
 dim = 128
 metric_type = "L2"
-index_type = "flat"
+index_type = "Flat"
 
 [server]
 search_url_suffix = "/search"
