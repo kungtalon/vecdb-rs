@@ -11,36 +11,36 @@ use tracing::{event, Level};
 
 use crate::filter::{IdFilter, IntFilterIndex, IntFilterInput};
 use crate::merror::DBError;
+use crate::persistence::{Persistence, WALLogOperation, WALLogRecord};
 use crate::scalar::{new_scalar_storage, ScalarStorage};
 use crate::{index::*, scalar};
 
 pub type DocMap = HashMap<String, Value>;
 
+const SCALAR_DB_FILE_SUFFIX: &str = "scalar.db";
+const INDEX_FILE_SUFFIX: &str = "index.bin";
+const FILTER_FILE_SUFFIX: &str = "filter.bin";
+const WAL_FILE_SUFFIX: &str = "vdb.log";
+
 pub struct VectorDatabase {
-    params: Arc<IndexParams>,
+    params: DatabaseParams,
 
     scalar_storage: Arc<dyn ScalarStorage>,
     vector_index: Arc<Mutex<dyn Index + Send>>,
-    filter_index: Arc<RwLock<IntFilterIndex>>,
+    filter_index: RwLock<IntFilterIndex>,
+
+    persistence: Arc<Persistence>,
 }
 
-impl Clone for VectorDatabase {
-    fn clone(&self) -> Self {
-        Self {
-            params: Arc::clone(&self.params),
-            scalar_storage: Arc::clone(&self.scalar_storage),
-            vector_index: Arc::clone(&self.vector_index),
-            filter_index: Arc::clone(&self.filter_index),
-        }
-    }
-}
+unsafe impl Sync for VectorDatabase {}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IndexParams {
+pub struct DatabaseParams {
     pub dim: u32,
     pub metric_type: MetricType,
     pub index_type: IndexType,
     pub hnsw_params: Option<HnswIndexOption>,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -63,41 +63,62 @@ pub struct VectorSearchArgs {
     pub hnsw_params: Option<HnswSearchOption>,
 }
 
-impl VectorDatabase {
-    pub fn new<D: AsRef<Path>>(db_path: D, index_params: IndexParams) -> Result<Self, DBError> {
-        let index_params_copy = index_params.clone();
+fn new_index(index_params: DatabaseParams) -> Result<Arc<Mutex<dyn Index + Send>>, DBError> {
+    let index: Arc<Mutex<dyn Index + Send>> = match index_params.index_type {
+        IndexType::Flat => {
+            // Create a flat index
+            Arc::new(Mutex::new(
+                FlatIndex::new(index_params.dim, index_params.metric_type).map_err(|e| {
+                    DBError::CreateError(format!("unable to create vector index: {e}"))
+                })?,
+            ))
+        }
+        IndexType::Hnsw => {
+            // Create an HNSW index
+            Arc::new(Mutex::new(
+                HnswIndex::new(
+                    index_params.dim,
+                    index_params.metric_type,
+                    index_params.hnsw_params,
+                )
+                .map_err(|e| DBError::CreateError(format!("unable to create vector index: {e}")))?,
+            ))
+        }
+    };
 
-        let db_path = PathBuf::new().join(db_path);
-        let scalar_storage = Arc::new(new_scalar_storage(db_path)?);
-        let vector_index: Arc<Mutex<dyn Index + Send>> = match index_params.index_type {
-            IndexType::Flat => {
-                // Create a flat index
-                Arc::new(Mutex::new(
-                    FlatIndex::new(index_params.dim, index_params.metric_type).map_err(|e| {
-                        DBError::CreateError(format!("unable to create vector index: {e}"))
-                    })?,
-                ))
-            }
-            IndexType::Hnsw => {
-                // Create an HNSW index
-                Arc::new(Mutex::new(
-                    HnswIndex::new(
-                        index_params.dim,
-                        index_params.metric_type,
-                        index_params.hnsw_params,
-                    )
-                    .map_err(|e| {
-                        DBError::CreateError(format!("unable to create vector index: {e}"))
-                    })?,
-                ))
-            }
-        };
+    Ok(index)
+}
+
+impl VectorDatabase {
+    pub fn new<D: AsRef<Path>>(db_path: D, db_params: DatabaseParams) -> Result<Self, DBError> {
+        let db_params_copy = db_params.clone();
+
+        let scalar_db_path = PathBuf::new().join(&db_path).join(SCALAR_DB_FILE_SUFFIX);
+        let scalar_storage = Arc::new(new_scalar_storage(scalar_db_path)?);
+        let vector_index: Arc<Mutex<dyn Index + Send>> = new_index(db_params)?;
+        let filter_index = RwLock::new(IntFilterIndex::new());
+
+        let persistence_path = PathBuf::new().join(&db_path).join(WAL_FILE_SUFFIX);
+        let persistence_path_str = persistence_path.to_str().ok_or(DBError::CreateError(
+            "Failed to convert persistence path to str".into(),
+        ))?;
+        let persistence = Arc::new(
+            Persistence::new(
+                persistence_path_str,
+                &db_params_copy.version,
+                scalar_storage.as_ref(),
+            )
+            .map_err(|e| {
+                DBError::CreateError(format!("unable to create persistence layer: {e}"))
+            })?,
+        );
 
         Ok(Self {
-            params: Arc::new(index_params_copy),
+            params: db_params_copy,
             scalar_storage,
             vector_index,
-            filter_index: Arc::new(RwLock::new(IntFilterIndex::new())),
+            filter_index,
+            persistence,
         })
     }
 
@@ -311,6 +332,49 @@ impl VectorDatabase {
 
         Ok(documents)
     }
+
+    pub async fn recover_database(&mut self) -> Result<(), DBError> {
+        event!(
+            Level::INFO,
+            "Recovering vector database from saved files..."
+        );
+
+        let wal_record_iter =
+            self.persistence.get_wal_log_iterator().await.map_err(|e| {
+                DBError::CreateError(format!("Failed to get WAL log iterator: {e}"))
+            })?;
+        for record in wal_record_iter {
+            match record {
+                Ok(record) => {
+                    // Apply the WAL log record to the database
+                    self.apply_wal_log_record(record);
+                }
+                Err(e) => {
+                    event!(Level::ERROR, "Failed to read WAL log record: {e}");
+
+                    return Err(DBError::CreateError(format!(
+                        "Failed to read WAL log record: {e}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_wal_log_record(&mut self, record: WALLogRecord) {
+        match record.operation {
+            WALLogOperation::Insert => {
+                // Apply insert operation
+            }
+            WALLogOperation::Update => {
+                // Apply update operation
+            }
+            WALLogOperation::Delete => {
+                // Apply delete operation
+            }
+        }
+    }
 }
 
 impl VectorInsertArgs {
@@ -347,12 +411,13 @@ mod tests {
     use tracing_subscriber::fmt;
     use uuid::Uuid;
 
-    fn create_test_index_params(metric_type: MetricType, index_type: IndexType) -> IndexParams {
-        IndexParams {
+    fn create_test_index_params(metric_type: MetricType, index_type: IndexType) -> DatabaseParams {
+        DatabaseParams {
             dim: 3,
             metric_type,
             index_type,
             hnsw_params: None,
+            version: "0.1.0".to_string(),
         }
     }
 

@@ -12,18 +12,20 @@ use axum::{
     Router,
 };
 use axum_extra::extract::WithRejection;
+use axum_macros::debug_handler;
+use futures::lock::Mutex;
 use merror::ApiError;
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use std::str::FromStr;
+use std::{net::SocketAddr, sync::Arc};
 use tracing::{event, span, Level};
 use tracing_subscriber::fmt as tracing_fmt;
 
-use vecdb::{DocMap, IndexParams, VectorDatabase, VectorInsertArgs, VectorSearchArgs};
+use vecdb::{DatabaseParams, DocMap, VectorDatabase, VectorInsertArgs, VectorSearchArgs};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
-    pub index: IndexParams,
+    pub database: DatabaseParams,
     pub file_path: String,
     pub server: ServerConfig,
 }
@@ -46,8 +48,9 @@ struct VectorUpsertResponse {
     message: String,
 }
 
+#[debug_handler]
 async fn handle_vector_search(
-    State(mut vdb): State<VectorDatabase>,
+    State(vdb): State<Arc<Mutex<VectorDatabase>>>,
     WithRejection(Json(payload), _): WithRejection<Json<VectorSearchArgs>, ApiError>,
 ) -> (StatusCode, Json<VectorSearchResponse>) {
     let span = span!(Level::TRACE, "handle_vector_search");
@@ -65,7 +68,12 @@ async fn handle_vector_search(
         k: payload.k,
         hnsw_params: payload.hnsw_params,
     };
-    let results = vdb.query(search_args).await;
+
+    let results = {
+        let mut vdb_guard = vdb.lock().await;
+
+        vdb_guard.query(search_args).await
+    };
 
     match results {
         Ok(results) => {
@@ -82,11 +90,12 @@ async fn handle_vector_search(
     }
 }
 
+#[debug_handler]
 async fn handle_vector_upsert(
-    State(mut vdb): State<VectorDatabase>,
+    State(vdb): State<Arc<Mutex<VectorDatabase>>>,
     WithRejection(Json(payload), _): WithRejection<Json<VectorInsertArgs>, ApiError>,
 ) -> (StatusCode, Json<VectorUpsertResponse>) {
-    let span = span!(Level::TRACE, "handle_vector_search");
+    let span = span!(Level::TRACE, "handle_vector_upsert");
     let _enter = span.enter();
 
     event!(
@@ -95,7 +104,11 @@ async fn handle_vector_upsert(
         payload
     );
 
-    let results = vdb.upsert(payload).await;
+    let results = {
+        let mut vdb_guard = vdb.lock().await;
+
+        vdb_guard.upsert(payload).await
+    };
 
     match results {
         Ok(_) => {
@@ -136,7 +149,9 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    let vdb: VectorDatabase = VectorDatabase::new(app_config.file_path, app_config.index).unwrap();
+    let vdb: VectorDatabase =
+        VectorDatabase::new(app_config.file_path, app_config.database).unwrap();
+    let vdb_state = Arc::new(Mutex::new(vdb));
 
     let app = Router::new()
         .route(
@@ -147,7 +162,7 @@ async fn main() {
             &app_config.server.upsert_url_suffix,
             post(handle_vector_upsert),
         )
-        .with_state(vdb);
+        .with_state(vdb_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], app_config.server.port));
     println!("Server listening on {addr}");

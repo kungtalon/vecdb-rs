@@ -1,5 +1,5 @@
 use crate::merror::{DataError, FileError};
-use crate::scalar::ScalarStorage;
+use crate::scalar::{ScalarStorage, NAMESPACE_WALLOGS};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Lines, Write};
@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::event;
 
-const WAL_LOG_ID_KEY: &[u8] = b"__wal_log_id__";
+const WAL_LOG_ID_KEY: &str = "__wal_log_id__";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WALLogOperation {
@@ -35,9 +35,10 @@ impl TryFrom<&str> for WALLogRecord {
 }
 
 pub struct Persistence {
-    pub counter: AtomicU64,
-    pub file_path: String,
-    pub wal_log_writer: File,
+    counter: AtomicU64,
+    file_path: String,
+    wal_log_writer: File,
+
     pub version: String,
 }
 
@@ -82,7 +83,7 @@ fn new_persistence(
 ) -> Result<Persistence, FileError> {
     // try to get the counter from the scalar database
     let last_log_id: u64 = scalar_db
-        .get(WAL_LOG_ID_KEY)
+        .get(format!("{NAMESPACE_WALLOGS}{WAL_LOG_ID_KEY}").as_bytes())
         .map_err(|e| FileError(format!("Failed to get WAL counter: {e}")))?
         .map(|bytes: Vec<u8>| {
             let bytes_u64: [u8; 8] = bytes.clone().try_into().map_err(|_| {
@@ -118,7 +119,7 @@ impl Persistence {
         file_path: &str,
         version: &str,
         scalar_db: &impl ScalarStorage,
-    ) -> Result<Persistence, FileError> {
+    ) -> Result<Self, FileError> {
         new_persistence(file_path, version, scalar_db)
     }
 
@@ -161,7 +162,7 @@ impl Persistence {
         Ok(())
     }
 
-    async fn get_wal_log_iterator(&self) -> Result<WALLogRecordIter, FileError> {
+    pub async fn get_wal_log_iterator(&self) -> Result<WALLogRecordIter, FileError> {
         WALLogRecordIter::new(&self.file_path)
     }
 }

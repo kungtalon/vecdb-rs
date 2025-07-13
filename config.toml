@@ -1,9 +1,10 @@
 file_path = "./testdata"
 
-[index]
+[database]
 dim = 128
 metric_type = "L2"
 index_type = "Flat"
+version = "0.1.0"
 
 [server]
 search_url_suffix = "/search"
