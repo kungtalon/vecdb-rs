@@ -10,7 +10,7 @@ type Mdb = rocksdb::DBWithThreadMode<rocksdb::MultiThreaded>;
 
 const KEY_ID_MAX: &str = "__id_max__";
 pub const NAMESPACE_DOCS: &str = "docs";
-pub const NAMESPACE_WALLOGS: &str = "wal_logs";
+pub const NAMESPACE_WALS: &str = "wals";
 
 pub trait ScalarStorage: Sync + Send {
     fn put(&self, key: &[u8], values: &[u8]) -> Result<(), DBError>;

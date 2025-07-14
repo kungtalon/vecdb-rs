@@ -11,7 +11,7 @@ use tracing::{event, Level};
 
 use crate::filter::{IdFilter, IntFilterIndex, IntFilterInput};
 use crate::merror::DBError;
-use crate::persistence::{Persistence, WALLogOperation, WALLogRecord};
+use crate::persistence::{apply_wal_record, Persistence, RollbackGuard};
 use crate::scalar::{new_scalar_storage, ScalarStorage};
 use crate::{index::*, scalar};
 
@@ -145,19 +145,12 @@ impl VectorDatabase {
 
         event!(Level::DEBUG, "upsert vector data with ids: {:?}", ids);
 
-        self.insert_vectors(ids.clone(), &args).await?;
-
-        let mut attributes = args.attributes;
+        let mut attributes: Vec<Option<HashMap<String, Value>>> = args.attributes.clone();
         if attributes.is_empty() {
             attributes = vec![Some(HashMap::new()); args.data_row];
         }
 
-        for ((i, doc), attr) in args
-            .docs
-            .into_iter()
-            .enumerate()
-            .zip(attributes.into_iter())
-        {
+        for ((i, doc), attr) in args.docs.iter().enumerate().zip(attributes.into_iter()) {
             let mut doc_map = match doc {
                 Some(m) => m.clone().to_owned(),
                 None => HashMap::new(),
@@ -170,6 +163,14 @@ impl VectorDatabase {
             if !attr_map.is_empty() {
                 self.insert_attribute(&attr_map, ids[i]).await?;
             }
+        }
+
+        if let Err(e) = self.insert_vectors(ids.clone(), &args).await {
+            event!(Level::ERROR, "Failed to insert vectors: {}", e);
+
+            self.revert_attributes(&args.attributes, &ids);
+
+            return Err(e);
         }
 
         Ok(())
@@ -267,6 +268,23 @@ impl VectorDatabase {
         Ok(())
     }
 
+    fn revert_attributes(&mut self, attrs: &Vec<Option<HashMap<String, Value>>>, ids: &Vec<u64>) {
+        for (attr, id) in attrs.iter().zip(ids) {
+            if let Some(attr) = attr {
+                for (key, value) in attr {
+                    match value {
+                        Value::Number(num) => {
+                            if let Some(num) = num.as_i64() {
+                                self.filter_index.write().unwrap().remove(key, num, *id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn query(&mut self, search_args: VectorSearchArgs) -> Result<Vec<DocMap>, DBError> {
         let mut query = SearchQuery::new(search_args.query);
 
@@ -339,41 +357,28 @@ impl VectorDatabase {
             "Recovering vector database from saved files..."
         );
 
-        let wal_record_iter =
-            self.persistence.get_wal_log_iterator().await.map_err(|e| {
-                DBError::CreateError(format!("Failed to get WAL log iterator: {e}"))
-            })?;
+        let wal_record_iter = self
+            .persistence
+            .get_wal_iterator()
+            .await
+            .map_err(|e| DBError::CreateError(format!("Failed to get WAL iterator: {e}")))?;
         for record in wal_record_iter {
             match record {
                 Ok(record) => {
-                    // Apply the WAL log record to the database
-                    self.apply_wal_log_record(record);
+                    // Apply the wal record to the database
+                    apply_wal_record(record, self);
                 }
                 Err(e) => {
-                    event!(Level::ERROR, "Failed to read WAL log record: {e}");
+                    event!(Level::ERROR, "Failed to read WAL record: {e}");
 
                     return Err(DBError::CreateError(format!(
-                        "Failed to read WAL log record: {e}"
+                        "Failed to read WAL record: {e}"
                     )));
                 }
             }
         }
 
         Ok(())
-    }
-
-    fn apply_wal_log_record(&mut self, record: WALLogRecord) {
-        match record.operation {
-            WALLogOperation::Insert => {
-                // Apply insert operation
-            }
-            WALLogOperation::Update => {
-                // Apply update operation
-            }
-            WALLogOperation::Delete => {
-                // Apply delete operation
-            }
-        }
     }
 }
 

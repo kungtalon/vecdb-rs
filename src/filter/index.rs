@@ -34,9 +34,21 @@ impl IntFilterIndex {
     pub fn upsert(&mut self, field: &str, value: i64, id: u64) {
         let filter_map_by_value = self.int_field_filters.entry(field.to_string()).or_default();
 
-        let bitmap = filter_map_by_value.entry(value).or_default();
+        filter_map_by_value
+            .entry(value)
+            .or_default()
+            .insert(id as u32);
+    }
 
-        bitmap.insert(id as u32);
+    pub fn remove(&mut self, field: &str, value: i64, id: u64) {
+        if let Some(filter_map_by_value) = self.int_field_filters.get_mut(field) {
+            if let Some(bitmap) = filter_map_by_value.get_mut(&value) {
+                bitmap.remove(id as u32);
+                if bitmap.is_empty() {
+                    filter_map_by_value.remove(&value);
+                }
+            }
+        }
     }
 
     pub fn apply(&self, input: &IntFilterInput, bitmap: &RoaringBitmap) -> RoaringBitmap {
