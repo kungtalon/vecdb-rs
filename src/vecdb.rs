@@ -11,7 +11,7 @@ use tracing::{event, Level};
 
 use crate::filter::{IdFilter, IntFilterIndex, IntFilterInput};
 use crate::merror::DBError;
-use crate::persistence::{apply_wal_record, Persistence, RollbackGuard};
+use crate::persistence::{apply_wal_record, Persistence};
 use crate::scalar::{new_scalar_storage, ScalarStorage};
 use crate::{index::*, scalar};
 
@@ -44,10 +44,8 @@ pub struct DatabaseParams {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VectorInsertArgs {
-    pub flat_data: Vec<f32>,
-    pub data_row: usize,
-    pub data_dim: usize,
+pub struct VdbUpsertArgs {
+    pub vectors: VectorArgs,
     pub docs: Vec<Option<DocMap>>,
     pub attributes: Vec<Option<HashMap<String, Value>>>,
 
@@ -55,7 +53,14 @@ pub struct VectorInsertArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct VectorSearchArgs {
+pub struct VectorArgs {
+    pub flat_data: Vec<f32>,
+    pub data_row: usize,
+    pub data_dim: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VdbSearchArgs {
     pub query: Vec<f32>,
     pub k: usize,
     pub filter_inputs: Option<Vec<IntFilterInput>>,
@@ -122,7 +127,7 @@ impl VectorDatabase {
         })
     }
 
-    pub async fn upsert(&mut self, args: VectorInsertArgs) -> Result<(), DBError> {
+    pub async fn upsert(&mut self, args: VdbUpsertArgs) -> Result<(), DBError> {
         let (mismatch_field, mismatch_value, expect_value) = args.validate();
 
         if !mismatch_field.is_empty() {
@@ -139,36 +144,47 @@ impl VectorDatabase {
             )));
         }
 
-        let ids: Vec<u64> = self
-            .scalar_storage
-            .gen_incr_ids(scalar::NAMESPACE_DOCS, args.data_row)?;
+        let ids: Arc<Vec<u64>> = Arc::new(
+            self.scalar_storage
+                .gen_incr_ids(scalar::NAMESPACE_DOCS, args.vectors.data_row)?,
+        );
 
         event!(Level::DEBUG, "upsert vector data with ids: {:?}", ids);
 
-        let mut attributes: Vec<Option<HashMap<String, Value>>> = args.attributes.clone();
+        // process attributes
+        let mut attributes: Arc<Vec<HashMap<String, Value>>> = Arc::new(
+            args.attributes
+                .into_iter()
+                .map(|e| match e {
+                    Some(attr) => attr,
+                    None => HashMap::new(),
+                })
+                .collect::<Vec<_>>(),
+        );
         if attributes.is_empty() {
-            attributes = vec![Some(HashMap::new()); args.data_row];
+            attributes = Arc::new(vec![HashMap::new(); args.vectors.data_row]);
         }
 
-        for ((i, doc), attr) in args.docs.iter().enumerate().zip(attributes.into_iter()) {
+        for ((i, doc), attr) in args.docs.iter().enumerate().zip(attributes.iter()) {
             let mut doc_map = match doc {
                 Some(m) => m.clone().to_owned(),
                 None => HashMap::new(),
             };
 
-            let attr_map = attr.unwrap_or_default();
+            self.insert_doc(&mut doc_map, &attr, ids[i]).await?;
 
-            self.insert_doc(&mut doc_map, &attr_map, ids[i]).await?;
-
-            if !attr_map.is_empty() {
-                self.insert_attribute(&attr_map, ids[i]).await?;
+            if !attr.is_empty() {
+                self.insert_attribute(&attr, ids[i]).await?;
             }
         }
 
-        if let Err(e) = self.insert_vectors(ids.clone(), &args).await {
-            event!(Level::ERROR, "Failed to insert vectors: {}", e);
+        if let Err(e) = self
+            .insert_vectors(ids.as_ref().clone(), &args.vectors, args.hnsw_params)
+            .await
+        {
+            event!(Level::ERROR, "Failed to insert vectors: {e}");
 
-            self.revert_attributes(&args.attributes, &ids);
+            self.revert_attributes(&attributes, &ids);
 
             return Err(e);
         }
@@ -179,7 +195,8 @@ impl VectorDatabase {
     async fn insert_vectors(
         &mut self,
         ids: Vec<u64>,
-        args: &VectorInsertArgs,
+        args: &VectorArgs,
+        hnsw_params: Option<HnswParams>,
     ) -> Result<(), DBError> {
         let insert_data =
             Array::from_shape_vec((args.data_row, args.data_dim), args.flat_data.clone()).map_err(
@@ -187,7 +204,6 @@ impl VectorDatabase {
             )?;
 
         let vector_index_writer = Arc::clone(&self.vector_index);
-        let hnsw_params = args.hnsw_params.clone();
 
         let res_async_insert = task::spawn_blocking(move || {
             let index_insert_params = InsertParams {
@@ -268,24 +284,22 @@ impl VectorDatabase {
         Ok(())
     }
 
-    fn revert_attributes(&mut self, attrs: &Vec<Option<HashMap<String, Value>>>, ids: &Vec<u64>) {
+    fn revert_attributes(&mut self, attrs: &Vec<HashMap<String, Value>>, ids: &Vec<u64>) {
         for (attr, id) in attrs.iter().zip(ids) {
-            if let Some(attr) = attr {
-                for (key, value) in attr {
-                    match value {
-                        Value::Number(num) => {
-                            if let Some(num) = num.as_i64() {
-                                self.filter_index.write().unwrap().remove(key, num, *id);
-                            }
+            for (key, value) in attr {
+                match value {
+                    Value::Number(num) => {
+                        if let Some(num) = num.as_i64() {
+                            self.filter_index.write().unwrap().remove(key, num, *id);
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
         }
     }
 
-    pub async fn query(&mut self, search_args: VectorSearchArgs) -> Result<Vec<DocMap>, DBError> {
+    pub async fn query(&mut self, search_args: VdbSearchArgs) -> Result<Vec<DocMap>, DBError> {
         let mut query = SearchQuery::new(search_args.query);
 
         if query.vector.len() != self.params.dim as usize {
@@ -382,21 +396,21 @@ impl VectorDatabase {
     }
 }
 
-impl VectorInsertArgs {
+impl VdbUpsertArgs {
     fn validate(&self) -> (&str, usize, usize) {
-        if self.docs.len() != self.data_row {
-            return ("docs", self.docs.len(), self.data_row);
+        if self.docs.len() != self.vectors.data_row {
+            return ("docs", self.docs.len(), self.vectors.data_row);
         }
 
-        if !self.attributes.is_empty() && self.attributes.len() != self.data_row {
-            return ("attributes", self.attributes.len(), self.data_row);
+        if !self.attributes.is_empty() && self.attributes.len() != self.vectors.data_row {
+            return ("attributes", self.attributes.len(), self.vectors.data_row);
         }
 
-        if self.data_dim * self.data_row != self.flat_data.len() {
+        if self.vectors.data_dim * self.vectors.data_row != self.vectors.flat_data.len() {
             return (
                 "flat_data",
-                self.flat_data.len(),
-                self.data_dim * self.data_row,
+                self.vectors.flat_data.len(),
+                self.vectors.data_dim * self.vectors.data_row,
             );
         }
 
@@ -517,10 +531,12 @@ mod tests {
                         Value::String("value".to_string()),
                     )]);
 
-                    let result = db.upsert(VectorInsertArgs{
-                        flat_data: data_array.iter().map(|x| *x).collect(),
-                        data_row: 2,
-                        data_dim: 3,
+                    let result = db.upsert(VdbUpsertArgs{
+                        vectors: VectorArgs {
+                            flat_data: data_array.iter().map(|x| *x).collect(),
+                            data_row: 2,
+                            data_dim: 3,
+                        },
                         docs: vec![Some(doc.clone()), Some(doc.clone())],
                         attributes: vec![],
                         hnsw_params: None,
@@ -548,10 +564,12 @@ mod tests {
                     )]);
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [-0.1, 0.2, -0.3]]);
-                    let res = db.upsert(VectorInsertArgs{
-                        flat_data: data_array.iter().map(|x| *x).collect(),
-                        data_row: 2,
-                        data_dim: 3,
+                    let res = db.upsert(VdbUpsertArgs{
+                        vectors: VectorArgs {
+                           flat_data: data_array.iter().map(|x| *x).collect(),
+                            data_row: 2,
+                            data_dim: 3,
+                        },
                         docs: vec![Some(doc1.clone()), Some(doc2)],
                         attributes: vec![],
                         hnsw_params: None,
@@ -559,7 +577,7 @@ mod tests {
 
                     assert!(res.is_ok(), "upsert failed: {:?}", res.err().unwrap());
 
-                    let mut search_args = VectorSearchArgs {
+                    let mut search_args =  VdbSearchArgs{
                         query: vec![0.1, 0.2, 0.3],
                         k: 10,
                         filter_inputs: None,
@@ -590,10 +608,12 @@ mod tests {
                     let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3, 0.4], [0.4, 0.5, 0.6, 0.7]]);
-                    let result = db.upsert(VectorInsertArgs{
-                        flat_data: data_array.iter().map(|x| *x).collect(),
-                        data_row: 2,
-                        data_dim: 4,
+                    let result = db.upsert(VdbUpsertArgs{
+                        vectors: VectorArgs {
+                            flat_data: data_array.iter().map(|x| *x).collect(),
+                            data_row: 2,
+                            data_dim: 4,
+                        },
                         docs: vec![None, None],
                         attributes: vec![],
                         hnsw_params: None,
@@ -602,10 +622,12 @@ mod tests {
                     assert!(result.is_err());
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]);
-                    let result = db.upsert(VectorInsertArgs{
-                        flat_data: data_array.iter().map(|x| *x).collect(),
-                        data_row: 3,
-                        data_dim: 3,
+                    let result = db.upsert(VdbUpsertArgs{
+                        vectors: VectorArgs {
+                            flat_data: data_array.iter().map(|x| *x).collect(),
+                            data_row: 3,
+                            data_dim: 3,
+                        },
                         docs: vec![None, None, None],
                         attributes: vec![],
                         hnsw_params: None,
@@ -622,7 +644,7 @@ mod tests {
                     let index_params = create_test_index_params($metric_type, $index_type);
                     let mut db = VectorDatabase::new(TestPath::new(), index_params).unwrap();
 
-                    let mut search_args = VectorSearchArgs {
+                    let mut search_args = VdbSearchArgs {
                         query: vec![0.1, 0.2, 0.3],
                         k: 1,
                         filter_inputs: None,
@@ -658,10 +680,12 @@ mod tests {
                     )]);
 
                     let data_array = standardize_vecs(&array![[0.1, 0.2, 0.3], [0.1, -0.2, 0.3]]);
-                    let res = db.upsert(VectorInsertArgs{
-                        flat_data: data_array.iter().map(|x| *x).collect(),
-                        data_row: 2,
-                        data_dim: 3,
+                    let res = db.upsert(VdbUpsertArgs{
+                        vectors: VectorArgs {
+                            flat_data: data_array.iter().map(|x| *x).collect(),
+                            data_row: 2,
+                            data_dim: 3,
+                        },
                         docs: vec![Some(doc1.clone()), Some(doc2.clone())],
                         attributes: vec![
                             Some(HashMap::from([("age".to_string(), Value::Number(10.into()))])),
@@ -672,7 +696,7 @@ mod tests {
 
                     assert!(res.is_ok(), "upsert failed: {:?}", res.err().unwrap());
 
-                    let mut search_args = VectorSearchArgs {
+                    let mut search_args = VdbSearchArgs {
                         query: vec![0.1, 0.2, 0.3],
                         k: 10,
                         filter_inputs: Some(vec![IntFilterInput {

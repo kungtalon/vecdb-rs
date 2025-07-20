@@ -1,7 +1,7 @@
 use crate::filter::IntFilterIndex;
 use crate::merror::{DataError, FileError};
 use crate::scalar::{ScalarStorage, NAMESPACE_WALS};
-use crate::vecdb::{VectorDatabase, VectorInsertArgs};
+use crate::vecdb::{VdbUpsertArgs, VectorDatabase};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Lines, Write};
@@ -174,7 +174,7 @@ pub async fn apply_wal_record(
 ) -> Result<(), DataError> {
     match record.operation {
         WALOperation::Upsert => {
-            let insert_args: VectorInsertArgs = serde_json::from_slice(&record.data)
+            let insert_args: VdbUpsertArgs = serde_json::from_slice(&record.data)
                 .map_err(|e| DataError(format!("Failed to deserialize Upsert data: {e}")))?;
 
             vec_db

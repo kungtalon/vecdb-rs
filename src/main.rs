@@ -21,7 +21,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tracing::{event, span, Level};
 use tracing_subscriber::fmt as tracing_fmt;
 
-use vecdb::{DatabaseParams, DocMap, VectorDatabase, VectorInsertArgs, VectorSearchArgs};
+use vecdb::{DatabaseParams, DocMap, VdbSearchArgs, VdbUpsertArgs, VectorDatabase};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -51,7 +51,7 @@ struct VectorUpsertResponse {
 #[debug_handler]
 async fn handle_vector_search(
     State(vdb): State<Arc<Mutex<VectorDatabase>>>,
-    WithRejection(Json(payload), _): WithRejection<Json<VectorSearchArgs>, ApiError>,
+    WithRejection(Json(payload), _): WithRejection<Json<VdbSearchArgs>, ApiError>,
 ) -> (StatusCode, Json<VectorSearchResponse>) {
     let span = span!(Level::TRACE, "handle_vector_search");
     let _enter = span.enter();
@@ -62,7 +62,7 @@ async fn handle_vector_search(
         payload
     );
 
-    let search_args = VectorSearchArgs {
+    let search_args = VdbSearchArgs {
         query: payload.query,
         filter_inputs: payload.filter_inputs,
         k: payload.k,
@@ -93,7 +93,7 @@ async fn handle_vector_search(
 #[debug_handler]
 async fn handle_vector_upsert(
     State(vdb): State<Arc<Mutex<VectorDatabase>>>,
-    WithRejection(Json(payload), _): WithRejection<Json<VectorInsertArgs>, ApiError>,
+    WithRejection(Json(payload), _): WithRejection<Json<VdbUpsertArgs>, ApiError>,
 ) -> (StatusCode, Json<VectorUpsertResponse>) {
     let span = span!(Level::TRACE, "handle_vector_upsert");
     let _enter = span.enter();
